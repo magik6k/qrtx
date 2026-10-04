@@ -452,7 +452,7 @@ async fn run(cli: Cli) -> Result<()> {
 
     let peer = tokio::select! {
         peer = peer_rx.recv() => peer.context("pairing channel closed")?,
-        _ = tokio::signal::ctrl_c() => {
+        _ = terminated() => {
             router.shutdown().await.ok();
             return Ok(());
         }
@@ -569,7 +569,7 @@ async fn run_dialer(
             loop {
                 let (tcp, from) = tokio::select! {
                     next = listener.accept() => next?,
-                    _ = tokio::signal::ctrl_c() => break,
+                    _ = terminated() => break,
                 };
                 debug!(%from, "accepted tcp connection");
                 let (conn, endpoint, peer) = (conn.clone(), endpoint.clone(), peer.clone());
@@ -635,8 +635,13 @@ async fn run_acceptor(
                 .with_context(|| format!("can't connect to {host}"))?;
             let (tcp_r, tcp_w) = tcp.into_split();
             tokio::select! {
-                res = forward_bidi(tcp_r, tcp_w, recv, send) => res?,
-                _ = tokio::signal::ctrl_c() => bail!("interrupted"),
+                res = forward_bidi(tcp_r, tcp_w, recv, send) => match res {
+                    Ok(()) => {}
+                    // the peer hung up (e.g. ssh exited and stopped its proxy)
+                    Err(_) if conn.close_reason().as_ref().is_some_and(is_clean_close) => {}
+                    Err(err) => return Err(err),
+                },
+                _ = terminated() => {}
             }
             status(format_args!("connection closed, exiting"));
             close(&conn);
@@ -659,7 +664,7 @@ async fn run_acceptor(
                         debug!("peer reconnected");
                         next = Some(conn);
                     }
-                    _ = tokio::signal::ctrl_c() => break,
+                    _ = terminated() => break,
                 }
             }
             Ok(())
@@ -784,9 +789,27 @@ async fn forward_stdio(
                 Err(err) => return Err(err),
             }
         }
-        _ = tokio::signal::ctrl_c() => bail!("interrupted"),
+        // the caller closes the connection, so the peer learns right away
+        _ = terminated() => {}
     }
     Ok(())
+}
+
+/// Ctrl-C, SIGTERM, or SIGHUP (which ssh sends its ProxyCommand on exit).
+async fn terminated() {
+    use tokio::signal::unix::{SignalKind, signal};
+    let (Ok(mut term), Ok(mut hup)) = (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::hangup()),
+    ) else {
+        tokio::signal::ctrl_c().await.ok();
+        return;
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
+        _ = hup.recv() => {}
+    }
 }
 
 fn print_qr(url: &str, device: &Device) {

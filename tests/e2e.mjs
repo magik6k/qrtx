@@ -355,7 +355,23 @@ export async function pairViaPage(site, ...urls) {
 
 export { cleanups, log, sleep };
 
-const scenarios = { tcp: tcpScenario, pipe: pipeScenario, roles: wrongRolesScenario, ssh: sshScenario };
+async function hangupScenario(site) {
+  log("== hangup: SIGHUP to a pipe client (what ssh does to its ProxyCommand) ends a --once server promptly");
+  const echo = net.createServer((s) => s.pipe(s));
+  await new Promise((r) => echo.listen(0, "127.0.0.1", r));
+  cleanups.push(() => echo.close());
+  const server = await startDevice("e2e-once", ["listen-tcp", "--once", "--host", `127.0.0.1:${echo.address().port}`], site);
+  const client = await startDevice("e2e-client", ["pipe"], site, { stdin: "pipe" });
+  await pairViaPage(site, server.url, client.url);
+  client.proc.stdin.write("ping\n"); // stdin stays open, like ssh's pipe to its proxy
+  await withTimeout((async () => { while (!Buffer.concat(client.stdout).toString().includes("ping")) await sleep(50); })(), 15_000, "echo through the tunnel");
+  client.proc.kill("SIGHUP");
+  const [s, c] = await withTimeout(Promise.all([server.exited, client.exited]), 5_000, "both sides to exit after SIGHUP");
+  if (s !== 0) throw new Error(`--once server exited ${s}\n${server.stderr}`);
+  log(`server exited ${s}, client exited ${c}`);
+}
+
+const scenarios = { tcp: tcpScenario, pipe: pipeScenario, roles: wrongRolesScenario, ssh: sshScenario, hup: hangupScenario };
 const only = process.env.SCENARIOS?.split(",") ?? Object.keys(scenarios);
 
 if (import.meta.main) {
