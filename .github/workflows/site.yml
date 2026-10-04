@@ -1,0 +1,117 @@
+# Builds qrtx for Linux/macOS (amd64 + arm64) and the wasm scanner, runs the
+# end-to-end test, and deploys ./site to GitHub Pages from main.
+name: site
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - run: pip install ziglang
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - run: ./build.sh bin x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-linux
+          path: site/dl/*.gz
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: ./build.sh bin aarch64-apple-darwin x86_64-apple-darwin
+      - run: gunzip -c site/dl/qrtx-darwin-arm64.gz > qrtx && chmod +x qrtx && ./qrtx --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-macos
+          path: site/dl/*.gz
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - id: wb
+        run: echo "version=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print }' Cargo.lock)" >> "$GITHUB_OUTPUT"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@${{ steps.wb.outputs.version }}
+      - run: cargo test --locked -p qrtx-proto
+      - run: ./build.sh scripts && ./build.sh web
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web
+          path: |
+            site
+            !site/dl
+
+  e2e:
+    needs: [linux, web]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: web
+          path: site
+      - uses: actions/download-artifact@v4
+        with:
+          name: bin-linux
+          path: site/dl
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: |
+          sudo apt-get update && sudo apt-get install -y openssh-server
+          gunzip -c site/dl/qrtx-linux-amd64.gz > qrtx && chmod +x qrtx
+          CHROME=$(command -v google-chrome || command -v chromium) node tests/e2e.mjs ./qrtx site
+
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: [linux, macos, web, e2e]
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.pages.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: web
+          path: site
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          path: site/dl
+          merge-multiple: true
+      - run: ./build.sh checksums
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: pages
+        uses: actions/deploy-pages@v4

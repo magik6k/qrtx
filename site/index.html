@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f6f5f1" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#121212" media="(prefers-color-scheme: dark)">
+  <meta name="referrer" content="no-referrer">
+  <title>qrtx</title>
+  <meta name="description" content="Connect two computers by scanning a QR code on each with your phone. Peer-to-peer, end-to-end encrypted, built on iroh.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23111'/%3E%3Cpath d='M3 3h4v4H3zM9 9h4v4H9zM9 3h4v1H9zM3 9h1v4H3z' fill='%23fff'/%3E%3C/svg%3E">
+  <link rel="modulepreload" href="pkg/qrtx_web.js">
+  <link rel="preload" href="pkg/qrtx_web_bg.wasm" as="fetch" type="application/wasm" crossorigin>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1><span class="mark" aria-hidden="true"></span>qrtx</h1>
+      <p class="tagline">Connect two computers by scanning a QR code on each with your phone.</p>
+    </header>
+
+    <section id="pairing" aria-label="Pairing">
+      <div id="viewfinder" hidden>
+        <video id="video" playsinline muted autoplay></video>
+        <div class="reticle" aria-hidden="true"></div>
+        <button id="stop-scan" class="ghost small" type="button">Stop camera</button>
+      </div>
+
+      <ol id="slots">
+        <li class="slot" data-slot="0">
+          <span class="num">1</span>
+          <div class="body">
+            <div class="title">First computer</div>
+            <div class="sub">Scan the QR code shown by <code>qrtx</code></div>
+          </div>
+          <span class="pill"></span>
+        </li>
+        <li class="slot" data-slot="1">
+          <span class="num">2</span>
+          <div class="body">
+            <div class="title">Second computer</div>
+            <div class="sub">Scan the other QR code</div>
+          </div>
+          <span class="pill"></span>
+        </li>
+      </ol>
+
+      <div id="message" role="status" aria-live="polite"></div>
+
+      <div class="actions">
+        <button id="scan" type="button" class="primary">Scan QR code</button>
+        <button id="restart" type="button" class="ghost" hidden>Start over</button>
+      </div>
+
+      <details id="paste-box">
+        <summary>No camera? Paste a link instead</summary>
+        <form id="paste-form">
+          <input id="paste" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false"
+                 placeholder="https://qrtx.lol/#Q1P.…" aria-label="qrtx link">
+          <button type="submit" class="ghost">Add</button>
+        </form>
+      </details>
+    </section>
+
+    <section id="setup" aria-labelledby="setup-h">
+      <h2 id="setup-h">On each computer</h2>
+      <p>Run <code>qrtx</code> on both machines (Linux or macOS, x86-64 or ARM). Each one shows a QR code. Scan the first with your phone's camera app, which opens this page, then scan the second here.</p>
+
+      <h3>Send a file</h3>
+      <div class="cmd"><span class="who">sender</span><pre><code>qrtx &lt; backup.tar</code></pre></div>
+      <div class="cmd"><span class="who">receiver</span><pre><code>qrtx &gt; backup.tar</code></pre></div>
+
+      <h3>SSH in without opening any ports</h3>
+      <div class="cmd"><span class="who">server</span><pre><code>curl -fsSL <span class="origin">https://qrtx.lol</span>/sshd | sh</code></pre></div>
+      <div class="cmd"><span class="who">laptop</span><pre><code>curl -fsSL <span class="origin">https://qrtx.lol</span>/ssh | sh -s -- me@myserver</code></pre></div>
+      <p class="note">The server side lets one SSH session in, then exits. On the laptop, your own <code>ssh</code> runs with qrtx as its proxy, so keys, agent forwarding and host key checks work as usual. <code>myserver</code> is only the name the host key is saved under. Once installed: <code>qrtx sshd</code> and <code>qrtx ssh me@myserver</code>.</p>
+
+      <h3>Forward any TCP port</h3>
+      <div class="cmd"><span class="who">server</span><pre><code>qrtx listen-tcp --host localhost:5432</code></pre></div>
+      <div class="cmd"><span class="who">laptop</span><pre><code>qrtx connect-tcp --addr 127.0.0.1:5432</code></pre></div>
+
+      <h3>Get it</h3>
+      <div class="cmd"><span class="who">install</span><pre><code>curl -fsSL <span class="origin">https://qrtx.lol</span>/install | sh</code></pre></div>
+      <p>Or run it without installing. Arguments go after <code>sh -s --</code>:</p>
+      <div class="cmd"><span class="who">run once</span><pre><code>curl -fsSL <span class="origin">https://qrtx.lol</span>/run | sh -s -- listen-tcp --host localhost:22</code></pre></div>
+      <p class="note">With <code>curl … | sh</code>, the script arrives on stdin, so qrtx can't read your data there. To pipe data without installing, use <code>sh -c "$(curl -fsSL <span class="origin">https://qrtx.lol</span>/run)" qrtx &lt; file</code>.</p>
+
+      <h2>How it works</h2>
+      <ul class="how">
+        <li>Each computer starts an <a href="https://iroh.computer">iroh</a> endpoint. Its QR code holds the endpoint's public key, its relay, and a one-time secret.</li>
+        <li>This page runs iroh in your browser. It dials each computer, checks it is talking to the key from the code, and proves it saw the code by sending the secret.</li>
+        <li>Then it tells each computer about the other. They connect to each other directly, with NAT hole punching and a relay as fallback. The connection is end-to-end encrypted and only accepts the peer your phone introduced. Your data never goes through your phone or this website.</li>
+        <li>This site is static files only. The ticket is in the URL fragment (<code>#…</code>), which browsers never send to the server.</li>
+      </ul>
+      <p class="foot">Inspired by <a href="https://github.com/n0-computer/dumbpipe">dumbpipe</a>.</p>
+    </section>
+  </main>
+  <canvas id="frame" hidden></canvas>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

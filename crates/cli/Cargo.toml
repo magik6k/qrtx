@@ -1,0 +1,19 @@
+[package]
+name = "qrtx"
+description = "Pair two machines with a phone by scanning QR codes, then pipe data between them over iroh"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+qrtx-proto.workspace = true
+iroh = { workspace = true, features = ["tls-ring", "portmapper", "fast-apple-datapath"] }
+n0-future.workspace = true
+anyhow.workspace = true
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+qrcode = { version = "0.14", default-features = false }
+gethostname = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

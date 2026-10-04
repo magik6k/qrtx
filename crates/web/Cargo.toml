@@ -1,0 +1,24 @@
+[package]
+name = "qrtx-web"
+description = "Browser side of qrtx: scans the codes and introduces the two devices"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+qrtx-proto.workspace = true
+iroh = { workspace = true, features = ["tls-ring"] }
+n0-future.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+wasm-bindgen = "0.2.100"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+serde-wasm-bindgen = "0.6"
+console_error_panic_hook = "0.1"
+rqrr = { version = "0.11", default-features = false }
