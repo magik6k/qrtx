@@ -1,3 +1,5 @@
+<!--
+[2K[8m `curl https://qrtx.lol` prints usage; see the end of this file -->
 <!doctype html>
 <html lang="en">
 <head>
@@ -99,5 +101,25 @@
   </main>
   <canvas id="frame" hidden></canvas>
   <script type="module" src="app.js"></script>
-</body>
-</html>
+  <!--[0m[H[2J
+ [1mqrtx[0m · connect two computers by scanning a QR code on each with your phone
+
+ Run qrtx on both machines and each prints a QR code. Scan one with your
+ phone's camera, then scan the other from the page that opens. The machines
+ then connect directly over an end-to-end encrypted iroh tunnel; your data
+ never goes through the phone or this site.
+
+ [1mSSH in[0m [2m(one session, no open ports)[0m
+   [36mcurl -fsSL https://qrtx.lol/sshd | sh[0m                    [2m# server[0m
+   [36mcurl -fsSL https://qrtx.lol/ssh | sh -s -- me@myserver[0m   [2m# laptop[0m
+
+ [1mInstall[0m, then e.g. send a file
+   [36mcurl -fsSL https://qrtx.lol/install | sh[0m
+   [36mqrtx < backup.tar[0m                                        [2m# sender[0m
+   [36mqrtx > backup.tar[0m                                        [2m# receiver[0m
+
+ [2mMore: qrtx --help · https://github.com/magik6k/qrtx[0m
+
+-->
+  <div hidden>
+[2K[1A[2K[0m

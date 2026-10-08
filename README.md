@@ -12,6 +12,8 @@ Works on Linux and macOS, x86-64 and arm64.
 
 ## Using qrtx.lol
 
+`curl https://qrtx.lol` prints a short version of this section.
+
 **SSH into a machine** (one session, no open ports):
 
 ```sh
