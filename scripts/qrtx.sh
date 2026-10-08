@@ -6,6 +6,10 @@
 #   curl -fsSL https://qrtx.lol/run | sh -s -- listen-tcp --host localhost:22
 #   sh -c "$(curl -fsSL https://qrtx.lol/run)" qrtx < file   # keeps your stdin
 #
+# Send a file without installing anything:
+#   sender:   curl -fsSL https://qrtx.lol/send | sh -s -- backup.tar
+#   receiver: curl -fsSL https://qrtx.lol/recv | sh -s -- backup.tar
+#
 # SSH into a machine without opening any ports (one session):
 #   server: curl -fsSL https://qrtx.lol/sshd | sh
 #   client: curl -fsSL https://qrtx.lol/ssh | sh -s -- me@myserver
@@ -13,7 +17,8 @@
 # Install:
 #   curl -fsSL https://qrtx.lol/install | sh
 #
-# /run, /install, /ssh and /sshd serve this same script; only QRTX_MODE differs.
+# /run, /install, /send, /recv, /ssh and /sshd serve this same script; only
+# QRTX_MODE differs.
 # They are generated from scripts/qrtx.sh by build.sh.
 #
 # Environment:
@@ -140,7 +145,7 @@ install() {
 
 case "$QRTX_MODE" in
     install) install ;;
-    sshd) run sshd "$@" ;;
+    send | recv | sshd) run "$QRTX_MODE" "$@" ;;
     ssh)
         # with `curl | sh` our stdin is the script; ssh needs the terminal
         if [ ! -t 0 ] && (exec </dev/tty) 2>/dev/null; then

@@ -4,7 +4,7 @@
 #   ./build.sh                  everything this machine can build
 #   ./build.sh web              wasm scanner         -> site/pkg/
 #   ./build.sh bin [TARGET...]  qrtx binaries        -> site/dl/*.gz + SHA256SUMS
-#   ./build.sh scripts          site/{run,install,ssh,sshd} from scripts/qrtx.sh
+#   ./build.sh scripts          site/{run,install,send,recv,ssh,sshd} from scripts/qrtx.sh
 #   ./build.sh checksums        regenerate site/dl/SHA256SUMS
 #   ./build.sh serve [PORT]     serve ./site locally (default 8000)
 #   ./build.sh test             end-to-end test with headless chromium
@@ -98,7 +98,7 @@ checksums() {
 }
 
 scripts() {
-    for mode in run install ssh sshd; do
+    for mode in run install send recv ssh sshd; do
         say "generating site/$mode ($SITE)"
         sed -e "s|^QRTX_MODE=\"\${QRTX_MODE:-run}\"\$|QRTX_MODE=\"\${QRTX_MODE:-$mode}\"|" \
             -e "s|^QRTX_SITE=\"\${QRTX_SITE:-https://qrtx.lol}\"\$|QRTX_SITE=\"\${QRTX_SITE:-$SITE}\"|" \

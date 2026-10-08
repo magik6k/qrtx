@@ -21,13 +21,22 @@ curl -fsSL https://qrtx.lol/sshd | sh                      # on the server
 curl -fsSL https://qrtx.lol/ssh | sh -s -- me@myserver     # on your laptop
 ```
 
+**Send a file**, nothing to install:
+
+```sh
+curl -fsSL https://qrtx.lol/send | sh -s -- backup.tar     # sender
+curl -fsSL https://qrtx.lol/recv | sh -s -- backup.tar     # receiver
+```
+
 **Install** and use it for anything else:
 
 ```sh
 curl -fsSL https://qrtx.lol/install | sh
 
-qrtx < backup.tar                              # machine A: send a file
-qrtx > backup.tar                              # machine B: receive it
+qrtx send backup.tar                           # machine A: send a file
+qrtx recv backup.tar                           # machine B: receive it
+tar c dir | qrtx                               # or any pipe; the other
+qrtx | tar x                                   # side runs plain `qrtx`
 
 qrtx listen-tcp --host localhost:5432          # machine A: share a TCP port
 qrtx connect-tcp --addr 127.0.0.1:5432         # machine B: use it locally
@@ -38,9 +47,10 @@ qrtx.lol. Scan the other code from that page. Done.
 
 Notes:
 
-- To run once without installing, use `curl -fsSL https://qrtx.lol/run | sh -s -- <args>`.
-  That leaves no stdin for your data, so to pipe data that way use
-  `sh -c "$(curl -fsSL https://qrtx.lol/run)" qrtx < file`.
+- `qrtx recv` writes to `FILE.part` and renames it once complete. It won't
+  overwrite an existing file unless you pass `--force`.
+- To run anything else once without installing, use
+  `curl -fsSL https://qrtx.lol/run | sh -s -- <args>`.
 - `qrtx sshd` lets in one connection, then exits.
 - `qrtx ssh` runs your normal `ssh` with qrtx as its proxy, so ssh options and
   host key checks work as usual. `myserver` is only the name the host key is
@@ -100,7 +110,7 @@ GitHub Pages.
 
 The code is in `crates/proto` (QR format and protocol), `crates/cli` (the
 `qrtx` binary), `crates/web` (the browser side), and `site/` (the page).
-`scripts/qrtx.sh` is the template for `/run`, `/install`, `/ssh` and `/sshd`.
+`scripts/qrtx.sh` is the template for `/run`, `/install`, `/send`, `/recv`, `/ssh` and `/sshd`.
 
 ## License
 

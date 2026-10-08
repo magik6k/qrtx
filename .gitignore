@@ -4,5 +4,7 @@
 /site/dl/
 /site/run
 /site/install
+/site/send
+/site/recv
 /site/ssh
 /site/sshd

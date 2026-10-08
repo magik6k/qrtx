@@ -3,9 +3,10 @@
 use std::{
     io::{IsTerminal, Write as _},
     net::{SocketAddr, ToSocketAddrs},
+    path::{Path, PathBuf},
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -96,6 +97,21 @@ enum Command {
         #[arg(long)]
         addr: String,
     },
+    /// Send a file to the peer, which runs `qrtx recv FILE` (or `qrtx > FILE`).
+    Send {
+        /// The file to send.
+        file: PathBuf,
+    },
+    /// Receive a file from the peer, which runs `qrtx send FILE` (or `qrtx < FILE`).
+    ///
+    /// Data goes to FILE.part first and is renamed to FILE once complete.
+    Recv {
+        /// Where to save the file.
+        file: PathBuf,
+        /// Overwrite FILE if it already exists.
+        #[arg(long)]
+        force: bool,
+    },
     /// Let a machine running `qrtx ssh` into this machine's SSH server.
     ///
     /// Accepts a single SSH session, then exits. Same as
@@ -124,7 +140,10 @@ enum Command {
 impl Command {
     fn role(&self) -> Role {
         match self {
-            Command::Pipe { .. } | Command::Ssh { .. } => Role::Pipe,
+            Command::Pipe { .. }
+            | Command::Send { .. }
+            | Command::Recv { .. }
+            | Command::Ssh { .. } => Role::Pipe,
             Command::ListenTcp { .. } | Command::Sshd { .. } => Role::ListenTcp,
             Command::ConnectTcp { .. } => Role::ConnectTcp,
         }
@@ -134,6 +153,8 @@ impl Command {
         match self {
             Command::Pipe { ssh_proxy: false } => "stdin/stdout".into(),
             Command::Pipe { ssh_proxy: true } | Command::Ssh { .. } => "ssh client".into(),
+            Command::Send { file } => format!("sends {}", file_name(file)),
+            Command::Recv { file, .. } => format!("receives into {}", file_name(file)),
             Command::ListenTcp { host, once: false } => format!("serves {host}"),
             Command::ListenTcp { host, once: true } => format!("serves {host}, one connection"),
             Command::ConnectTcp { addr } => format!("listens on {addr}"),
@@ -337,7 +358,179 @@ static QUIET: AtomicBool = AtomicBool::new(false);
 
 fn status(msg: std::fmt::Arguments) {
     if !QUIET.load(Ordering::Relaxed) {
-        eprintln!("qrtx: {msg}");
+        // clear a progress line that may be on screen
+        let clear = if std::io::stderr().is_terminal() {
+            "\r\x1b[2K"
+        } else {
+            ""
+        };
+        eprintln!("{clear}qrtx: {msg}");
+    }
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
+}
+
+fn part_path(file: &Path) -> PathBuf {
+    let mut part = file.as_os_str().to_owned();
+    part.push(".part");
+    part.into()
+}
+
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = n as f64;
+    let mut unit = 0;
+    while v >= 1024.0 && unit < UNITS.len() - 1 {
+        v /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", UNITS[unit])
+    }
+}
+
+/// Counts the bytes read from or written to the wrapped stream.
+struct Counted<T> {
+    inner: T,
+    count: Arc<AtomicU64>,
+}
+
+impl<T> Counted<T> {
+    fn new(inner: T, count: Arc<AtomicU64>) -> Self {
+        Self { inner, count }
+    }
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for Counted<T> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let res = std::pin::Pin::new(&mut self.inner).poll_read(cx, buf);
+        let n = buf.filled().len() - before;
+        self.count.fetch_add(n as u64, Ordering::Relaxed);
+        res
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for Counted<T> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let res = std::pin::Pin::new(&mut self.inner).poll_write(cx, buf);
+        if let std::task::Poll::Ready(Ok(n)) = &res {
+            self.count.fetch_add(*n as u64, Ordering::Relaxed);
+        }
+        res
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+/// A one-line progress display on stderr (only when it's a terminal), plus a
+/// summary line at the end.
+struct Progress {
+    count: Arc<AtomicU64>,
+    done_verb: &'static str,
+    name: String,
+    started: std::time::Instant,
+    ticker: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Progress {
+    fn start(
+        verb: &'static str,
+        done_verb: &'static str,
+        name: String,
+        total: Option<u64>,
+    ) -> Self {
+        let count = Arc::new(AtomicU64::new(0));
+        let started = std::time::Instant::now();
+        let ticker = std::io::stderr().is_terminal().then(|| {
+            let (count, name) = (count.clone(), name.clone());
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_millis(250));
+                loop {
+                    tick.tick().await;
+                    if QUIET.load(Ordering::Relaxed) {
+                        continue;
+                    }
+                    let n = count.load(Ordering::Relaxed);
+                    let rate = n as f64 / started.elapsed().as_secs_f64().max(0.001);
+                    let amount = match total {
+                        Some(total) if total > 0 => format!(
+                            "{:>3}%  {} / {}",
+                            n * 100 / total,
+                            human_bytes(n),
+                            human_bytes(total)
+                        ),
+                        _ => human_bytes(n),
+                    };
+                    eprint!(
+                        "\r\x1b[2Kqrtx: {verb} {name}  {amount}  {}/s",
+                        human_bytes(rate as u64)
+                    );
+                }
+            })
+        });
+        Self {
+            count,
+            done_verb,
+            name,
+            started,
+            ticker,
+        }
+    }
+
+    fn counter(&self) -> Arc<AtomicU64> {
+        self.count.clone()
+    }
+
+    fn finish(self) {
+        if let Some(ticker) = &self.ticker {
+            ticker.abort();
+        }
+        let n = self.count.load(Ordering::Relaxed);
+        let secs = self.started.elapsed().as_secs_f64();
+        status(format_args!(
+            "{} {} ({} in {:.1}s, {}/s)",
+            self.done_verb,
+            self.name,
+            human_bytes(n),
+            secs,
+            human_bytes((n as f64 / secs.max(0.001)) as u64)
+        ));
+    }
+}
+
+impl Drop for Progress {
+    fn drop(&mut self) {
+        if let Some(ticker) = self.ticker.take() {
+            ticker.abort();
+        }
     }
 }
 
@@ -378,7 +571,7 @@ async fn run(cli: Cli) -> Result<()> {
         .clone()
         .unwrap_or(Command::Pipe { ssh_proxy: false });
     let role = command.role();
-    let detail = command.detail();
+    let mut detail = command.detail();
     let command = match command {
         Command::Sshd { host } => Command::ListenTcp { host, once: true },
         other => other,
@@ -389,6 +582,25 @@ async fn run(cli: Cli) -> Result<()> {
     let mut tcp_target = Vec::new();
     match &command {
         Command::Pipe { .. } => {}
+        Command::Send { file } => {
+            let meta = std::fs::metadata(file)
+                .with_context(|| format!("can't read {}", file.display()))?;
+            anyhow::ensure!(meta.is_file(), "{} is not a file", file.display());
+            std::fs::File::open(file).with_context(|| format!("can't read {}", file.display()))?;
+            detail = format!("sends {} ({})", file_name(file), human_bytes(meta.len()));
+        }
+        Command::Recv { file, force } => {
+            anyhow::ensure!(
+                *force || !file.exists(),
+                "{} already exists (use --force to overwrite)",
+                file.display()
+            );
+            // make sure we can write there before anybody scans anything
+            let part = part_path(file);
+            std::fs::File::create(&part)
+                .with_context(|| format!("can't write {}", part.display()))?;
+            std::fs::remove_file(&part).ok();
+        }
         Command::ListenTcp { host, .. } => {
             tcp_target = host
                 .to_socket_addrs()
@@ -548,14 +760,14 @@ async fn run_dialer(
     let conn = dial(endpoint, peer).await?;
     tunnel_up(device, peer, &conn);
     match command {
-        Command::Pipe { ssh_proxy } => {
-            if *ssh_proxy {
+        Command::Pipe { .. } | Command::Send { .. } | Command::Recv { .. } => {
+            if matches!(command, Command::Pipe { ssh_proxy: true }) {
                 status(format_args!("starting ssh"));
                 QUIET.store(true, Ordering::Relaxed);
             }
             let (mut send, recv) = conn.open_bi().await?;
             send.write_all(&HANDSHAKE).await?;
-            forward_stdio(&conn, send, recv).await?;
+            forward_pipe(&conn, send, recv, command).await?;
             close(&conn);
             Ok(())
         }
@@ -616,10 +828,10 @@ async fn run_acceptor(
         .context("tunnel channel closed")?;
     tunnel_up(device, peer, &conn);
     match command {
-        Command::Pipe { .. } => {
+        Command::Pipe { .. } | Command::Send { .. } | Command::Recv { .. } => {
             let (send, mut recv) = conn.accept_bi().await?;
             read_handshake(&mut recv).await?;
-            forward_stdio(&conn, send, recv).await?;
+            forward_pipe(&conn, send, recv, command).await?;
             close(&conn);
             Ok(())
         }
@@ -746,26 +958,84 @@ async fn forward_bidi(
     res.map(|_| ())
 }
 
-/// Like [`forward_bidi`] for stdin/stdout, with one tweak: if stdin is a
-/// terminal, we stop once the peer is done sending, so `qrtx > file` exits
+/// Pipe-shaped modes: stdin/stdout, or a file for `send`/`recv`.
+async fn forward_pipe(
+    conn: &Connection,
+    send: SendStream,
+    recv: RecvStream,
+    command: &Command,
+) -> Result<()> {
+    match command {
+        Command::Send { file } => {
+            let f = tokio::fs::File::open(file).await?;
+            let size = f.metadata().await?.len();
+            let progress = Progress::start("sending", "sent", file_name(file), Some(size));
+            let input = Counted::new(f, progress.counter());
+            forward_io(conn, send, recv, input, &mut tokio::io::stdout(), false).await?;
+            progress.finish();
+            Ok(())
+        }
+        Command::Recv { file, .. } => {
+            let part = part_path(file);
+            let f = tokio::fs::File::create(&part)
+                .await
+                .with_context(|| format!("can't write {}", part.display()))?;
+            let progress = Progress::start("receiving", "received", file_name(file), None);
+            let mut output = Counted::new(f, progress.counter());
+            let res = forward_io(conn, send, recv, tokio::io::empty(), &mut output, false).await;
+            let res = match res {
+                Ok(()) => async {
+                    output.inner.sync_all().await?;
+                    tokio::fs::rename(&part, file).await?;
+                    anyhow::Ok(())
+                }
+                .await
+                .with_context(|| format!("can't save {}", file.display())),
+                Err(err) => Err(err),
+            };
+            if res.is_err() {
+                tokio::fs::remove_file(&part).await.ok();
+                return res;
+            }
+            progress.finish();
+            Ok(())
+        }
+        _ => {
+            let stdin_is_tty = std::io::stdin().is_terminal();
+            forward_io(
+                conn,
+                send,
+                recv,
+                tokio::io::stdin(),
+                &mut tokio::io::stdout(),
+                stdin_is_tty,
+            )
+            .await
+        }
+    }
+}
+
+/// Like [`forward_bidi`], with one tweak: with `stop_after_peer` (stdin is a
+/// terminal), we stop once the peer is done sending, so `qrtx > file` exits
 /// by itself instead of waiting for a Ctrl-D.
-async fn forward_stdio(
+async fn forward_io(
     conn: &Connection,
     mut send: SendStream,
     mut recv: RecvStream,
+    mut input: impl AsyncRead + Send + Unpin + 'static,
+    output: &mut (impl AsyncWrite + Unpin),
+    stop_after_peer: bool,
 ) -> Result<()> {
-    let stdin_is_tty = std::io::stdin().is_terminal();
     let mut up = tokio::spawn(async move {
-        tokio::io::copy(&mut tokio::io::stdin(), &mut send).await?;
+        tokio::io::copy(&mut input, &mut send).await?;
         send.finish()?;
         // wait until the peer has everything
         send.stopped().await.ok();
         anyhow::Ok(())
     });
     let down = async {
-        let mut stdout = tokio::io::stdout();
-        let res = tokio::io::copy(&mut recv, &mut stdout).await;
-        stdout.flush().await?;
+        let res = tokio::io::copy(&mut recv, output).await;
+        output.flush().await?;
         match res {
             Ok(_) => anyhow::Ok(()),
             Err(_) if conn.close_reason().as_ref().is_some_and(is_clean_close) => Ok(()),
@@ -776,7 +1046,7 @@ async fn forward_stdio(
     tokio::select! {
         res = &mut down => {
             res?;
-            if stdin_is_tty {
+            if stop_after_peer {
                 up.abort();
             } else {
                 up.await??;

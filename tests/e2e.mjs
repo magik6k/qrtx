@@ -14,8 +14,10 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-const QRTX = path.resolve(process.env.QRTX_BIN ?? process.argv[2] ?? "target/release/qrtx");
-const SITE = path.resolve(process.argv[3] ?? new URL("../site", import.meta.url).pathname);
+// argv only applies when run directly; importers get the defaults (or env)
+const argv = import.meta.main ? process.argv : [];
+const QRTX = path.resolve(process.env.QRTX_BIN ?? argv[2] ?? "target/release/qrtx");
+const SITE = path.resolve(argv[3] ?? new URL("../site", import.meta.url).pathname);
 const CHROME = process.env.CHROME ?? "chromium";
 const TIMEOUT = 120_000;
 
@@ -57,9 +59,9 @@ export function serveSite() {
 // ---------- devices ----------
 
 /** Starts qrtx; resolves once it printed its QR code. */
-export function startDevice(name, args, site, { stdin = "ignore", bin = QRTX } = {}) {
+export function startDevice(name, args, site, { stdin = "ignore", bin = QRTX, env = {} } = {}) {
   const proc = spawn(bin, args, {
-    env: { ...process.env, QRTX_SITE: site, QRTX_NAME: name, RUST_LOG: process.env.RUST_LOG ?? "warn" },
+    env: { ...process.env, QRTX_SITE: site, QRTX_NAME: name, RUST_LOG: process.env.RUST_LOG ?? "warn", ...env },
     stdio: [stdin === "ignore" ? "ignore" : "pipe", "pipe", "pipe"],
   });
   cleanups.push(() => proc.kill("SIGKILL"));
@@ -371,7 +373,45 @@ async function hangupScenario(site) {
   log(`server exited ${s}, client exited ${c}`);
 }
 
-const scenarios = { tcp: tcpScenario, pipe: pipeScenario, roles: wrongRolesScenario, ssh: sshScenario, hup: hangupScenario };
+async function scriptsScenario(site) {
+  log("== send/recv without installing: curl …/send | sh  and  curl …/recv | sh");
+  if (!existsSync(path.join(SITE, "send")) || !existsSync(path.join(SITE, "dl", "SHA256SUMS"))) {
+    log("site has no generated scripts or binaries (./build.sh scripts bin), skipping");
+    return;
+  }
+  const dir = path.join(tmp, "scripts");
+  mkdirSync(dir);
+  const input = path.join(dir, "in.bin"), output = path.join(dir, "out.bin");
+  const payload = randomBytes(3 * 1024 * 1024);
+  writeFileSync(input, payload);
+  const env = { XDG_CACHE_HOME: path.join(dir, "cache") };
+  const sender = await startDevice("e2e-send", ["-c", `curl -fsSL ${site}send | sh -s -- '${input}'`], site, { bin: "sh", env });
+  const receiver = await startDevice("e2e-recv", ["-c", `curl -fsSL ${site}recv | sh -s -- '${output}'`], site, { bin: "sh", env });
+  await pairViaPage(site, sender.url, receiver.url);
+  const codes = await withTimeout(Promise.all([sender.exited, receiver.exited]), 60_000, "send/recv to exit");
+  if (codes.some((c) => c !== 0)) throw new Error(`exit codes ${codes}\n${sender.stderr}\n${receiver.stderr}`);
+  if (!readFileSync(output).equals(payload)) throw new Error("received file differs");
+  if (existsSync(output + ".part")) throw new Error(".part file left behind");
+  if (!/sent in\.bin \(3\.0 MiB/.test(sender.stderr) || !/received out\.bin \(3\.0 MiB/.test(receiver.stderr)) {
+    throw new Error(`missing summary lines\n${sender.stderr}\n${receiver.stderr}`);
+  }
+  log("send/recv ok: 3 MiB, identical, summaries printed");
+}
+
+/** `curl https://qrtx.lol` prints usage thanks to control characters in index.html; keep them intact. */
+async function curlScenario() {
+  log("== index.html keeps its terminal control characters");
+  const html = readFileSync(path.join(SITE, "index.html"), "latin1");
+  if (!html.startsWith("<!--\r\x1b[2K\x1b[8m")) throw new Error("index.html no longer starts with <!--\\r ESC[2K ESC[8m");
+  if (!html.endsWith("<div hidden>\r\x1b[2K\x1b[1A\x1b[2K\x1b[0m")) throw new Error("index.html no longer ends with the erase+reset sequence");
+  if (!html.includes("\x1b[H\x1b[2J")) throw new Error("index.html lost the screen clear before the usage text");
+  log("ok");
+}
+
+const scenarios = {
+  curl: curlScenario, tcp: tcpScenario, pipe: pipeScenario, roles: wrongRolesScenario,
+  ssh: sshScenario, hup: hangupScenario, scripts: scriptsScenario,
+};
 const only = process.env.SCENARIOS?.split(",") ?? Object.keys(scenarios);
 
 if (import.meta.main) {

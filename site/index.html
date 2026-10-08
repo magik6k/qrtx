@@ -18,8 +18,11 @@
 <body>
   <main>
     <header>
-      <h1><span class="mark" aria-hidden="true"></span>qrtx</h1>
-      <p class="tagline">Connect two computers by scanning a QR code on each with your phone.</p>
+      <div class="top">
+        <h1><span class="mark" aria-hidden="true"></span>qrtx</h1>
+        <a class="gh" href="https://github.com/magik6k/qrtx"><svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>GitHub</a>
+      </div>
+      <p class="tagline">Connect two computers by scanning a QR code on each with your phone. They talk peer-to-peer over <a href="https://iroh.computer">iroh</a>, end-to-end encrypted.</p>
     </header>
 
     <section id="pairing" aria-label="Pairing">
@@ -69,9 +72,10 @@
       <h2 id="setup-h">On each computer</h2>
       <p>Run <code>qrtx</code> on both machines (Linux or macOS, x86-64 or ARM). Each one shows a QR code. Scan the first with your phone's camera app, which opens this page, then scan the second here.</p>
 
-      <h3>Send a file</h3>
-      <div class="cmd"><span class="who">sender</span><pre><code>qrtx &lt; backup.tar</code></pre></div>
-      <div class="cmd"><span class="who">receiver</span><pre><code>qrtx &gt; backup.tar</code></pre></div>
+      <h3>Send a file, nothing to install</h3>
+      <div class="cmd"><span class="who">sender</span><pre><code>curl -fsSL <span class="origin">https://qrtx.lol</span>/send | sh -s -- backup.tar</code></pre></div>
+      <div class="cmd"><span class="who">receiver</span><pre><code>curl -fsSL <span class="origin">https://qrtx.lol</span>/recv | sh -s -- backup.tar</code></pre></div>
+      <p class="note">The receiver writes to <code>backup.tar.part</code> and renames it once complete. Once installed: <code>qrtx send backup.tar</code> and <code>qrtx recv backup.tar</code>, or plain pipes like <code>tar c dir | qrtx</code> and <code>qrtx | tar x</code>.</p>
 
       <h3>SSH in without opening any ports</h3>
       <div class="cmd"><span class="who">server</span><pre><code>curl -fsSL <span class="origin">https://qrtx.lol</span>/sshd | sh</code></pre></div>
@@ -86,16 +90,76 @@
       <div class="cmd"><span class="who">install</span><pre><code>curl -fsSL <span class="origin">https://qrtx.lol</span>/install | sh</code></pre></div>
       <p>Or run it without installing. Arguments go after <code>sh -s --</code>:</p>
       <div class="cmd"><span class="who">run once</span><pre><code>curl -fsSL <span class="origin">https://qrtx.lol</span>/run | sh -s -- listen-tcp --host localhost:22</code></pre></div>
-      <p class="note">With <code>curl … | sh</code>, the script arrives on stdin, so qrtx can't read your data there. To pipe data without installing, use <code>sh -c "$(curl -fsSL <span class="origin">https://qrtx.lol</span>/run)" qrtx &lt; file</code>.</p>
+      <p class="note">The script downloads the right binary for your machine into <code>~/.cache/qrtx</code>, checks its SHA-256, and runs it.</p>
 
       <h2>How it works</h2>
+      <div class="diagrams">
+        <figure class="dg">
+          <svg class="dg-anim" viewBox="0 0 360 248" role="img" aria-labelledby="dg1-t">
+  <title id="dg1-t">The phone scans each computer, talks to each through an iroh relay over an end-to-end encrypted connection, introduces them, and they connect directly.</title>
+  <defs>
+    <symbol id="dg-qr" viewBox="0 0 24 24" width="24" height="24"><rect width="24" height="24" fill="#fff"/><path fill="#000" d="M2 2h7v7H2zM15 2h7v7h-7zM2 15h7v7H2zM11 11h3v3h-3zM15 15h3v3h-3zM19 19h3v3h-3zM11 17h2v5h-2zM17 11h5v2h-5zM11 2h2v4h-2z"/><path fill="#fff" d="M3 3h5v5H3zM16 3h5v5h-5zM3 16h5v5H3z"/><path fill="#000" d="M4 4h3v3H4zM17 4h3v3h-3zM4 17h3v3H4z"/></symbol>
+    <path id="dg1-pa" d="M172 158 L170 46 L130 40 L62 92"/>
+    <path id="dg1-pb" d="M188 158 L190 46 L230 40 L298 92"/>
+  </defs>
+  <path class="link" d="M172 158 L170 46 L130 40 L62 92"><animate attributeName="opacity" dur="9s" repeatCount="indefinite" keyTimes="0;0.12;0.8;0.9;1" values="0.15;0.6;0.6;0.15;0.15"/></path>
+  <path class="link" d="M188 158 L190 46 L230 40 L298 92"><animate attributeName="opacity" dur="9s" repeatCount="indefinite" keyTimes="0;0.44;0.8;0.9;1" values="0.15;0.15;0.6;0.15;0.15"/></path>
+  <g opacity="0"><animate attributeName="opacity" dur="9s" repeatCount="indefinite" keyTimes="0.0;0.7722;0.8;0.9778;1.0;1.0" values="0;0;1;1;0;0"/><line class="direct" x1="100" y1="118" x2="260" y2="118"/><g transform="translate(180 118)"><circle r="11" class="lockbg"/><path class="ok-stroke" fill="none" stroke-width="2" d="M-4 -2 V-5 A4 4 0 0 1 4 -5 V-2"/><rect class="ok" x="-6" y="-2" width="12" height="9" rx="2"/></g></g>
+  <rect class="untrusted" x="125" y="8" width="110" height="38" rx="8"/>
+  <text x="180" y="24" text-anchor="middle" class="b">iroh relay</text>
+  <text x="180" y="38" text-anchor="middle" class="muted small">only sees ciphertext</text>
+  <g transform="translate(20 92)"><rect class="dev" width="80" height="52" rx="5"/><rect class="scr" x="5" y="5" width="70" height="42" rx="2"/><path class="dev" d="M-8 58 H88 L82 52 H-2 Z"/><use href="#dg-qr" x="28" y="14"/><text x="40" y="78" text-anchor="middle">laptop A</text></g>
+  <g transform="translate(260 92)"><rect class="dev" width="80" height="52" rx="5"/><rect class="scr" x="5" y="5" width="70" height="42" rx="2"/><path class="dev" d="M-8 58 H88 L82 52 H-2 Z"/><use href="#dg-qr" x="28" y="14"/><text x="40" y="78" text-anchor="middle">laptop B</text></g>
+  <rect class="dev" x="163" y="156" width="34" height="62" rx="6"/><rect class="scr" x="166" y="162" width="28" height="48" rx="3"/>
+  <text x="204" y="200" class="muted small">your phone</text>
+  <polygon class="beam" points="180,158 48,106 76,130" opacity="0"><animate attributeName="opacity" dur="9s" repeatCount="indefinite" keyTimes="0.0;0.0167;0.0333;0.1111;0.1278;1.0" values="0;0;1;1;0;0"/></polygon>
+  <polygon class="beam" points="180,158 288,106 312,130" opacity="0"><animate attributeName="opacity" dur="9s" repeatCount="indefinite" keyTimes="0.0;0.3389;0.3556;0.4333;0.45;1.0" values="0;0;1;1;0;0"/></polygon>
+  <circle r="5" class="pkt" opacity="0"><animateMotion dur="9s" repeatCount="indefinite" calcMode="linear" keyTimes="0.0;0.1222;0.2222;1.0" keyPoints="0;0;1;1"><mpath href="#dg1-pa"/></animateMotion><animate attributeName="opacity" dur="9s" repeatCount="indefinite" keyTimes="0.0;0.1111;0.1222;0.2222;0.2333;1.0" values="0;0;1;1;0;0"/></circle>
+  <circle r="5" class="pkt" opacity="0"><animateMotion dur="9s" repeatCount="indefinite" calcMode="linear" keyTimes="0.0;0.2333;0.3333;1.0" keyPoints="1;1;0;0"><mpath href="#dg1-pa"/></animateMotion><animate attributeName="opacity" dur="9s" repeatCount="indefinite" keyTimes="0.0;0.2222;0.2333;0.3333;0.3444;1.0" values="0;0;1;1;0;0"/></circle>
+  <circle r="5" class="pkt" opacity="0"><animateMotion dur="9s" repeatCount="indefinite" calcMode="linear" keyTimes="0.0;0.4444;0.5444;1.0" keyPoints="0;0;1;1"><mpath href="#dg1-pb"/></animateMotion><animate attributeName="opacity" dur="9s" repeatCount="indefinite" keyTimes="0.0;0.4333;0.4444;0.5444;0.5556;1.0" values="0;0;1;1;0;0"/></circle>
+  <circle r="5" class="pkt" opacity="0"><animateMotion dur="9s" repeatCount="indefinite" calcMode="linear" keyTimes="0.0;0.5556;0.6556;1.0" keyPoints="1;1;0;0"><mpath href="#dg1-pb"/></animateMotion><animate attributeName="opacity" dur="9s" repeatCount="indefinite" keyTimes="0.0;0.5444;0.5556;0.6556;0.6667;1.0" values="0;0;1;1;0;0"/></circle>
+  <circle r="5" class="pkt intro" opacity="0"><animateMotion dur="9s" repeatCount="indefinite" calcMode="linear" keyTimes="0.0;0.6778;0.7889;1.0" keyPoints="0;0;1;1"><mpath href="#dg1-pa"/></animateMotion><animate attributeName="opacity" dur="9s" repeatCount="indefinite" keyTimes="0.0;0.6667;0.6778;0.7889;0.8;1.0" values="0;0;1;1;0;0"/></circle>
+  <circle r="5" class="pkt intro" opacity="0"><animateMotion dur="9s" repeatCount="indefinite" calcMode="linear" keyTimes="0.0;0.6778;0.7889;1.0" keyPoints="0;0;1;1"><mpath href="#dg1-pb"/></animateMotion><animate attributeName="opacity" dur="9s" repeatCount="indefinite" keyTimes="0.0;0.6667;0.6778;0.7889;0.8;1.0" values="0;0;1;1;0;0"/></circle>
+  <g class="steps">
+    <text x="180" y="242" text-anchor="middle" opacity="0"><animate attributeName="opacity" dur="9s" repeatCount="indefinite" keyTimes="0.0;0.0;0.0222;0.3333;0.3611;1.0" values="0;0;1;1;0;0"/>1 · scan laptop A; phone and A talk via the relay</text>
+    <text x="180" y="242" text-anchor="middle" opacity="0"><animate attributeName="opacity" dur="9s" repeatCount="indefinite" keyTimes="0.0;0.3278;0.3556;0.6556;0.6833;1.0" values="0;0;1;1;0;0"/>2 · scan laptop B; same, encrypted to its key</text>
+    <text x="180" y="242" text-anchor="middle" opacity="0"><animate attributeName="opacity" dur="9s" repeatCount="indefinite" keyTimes="0.0;0.65;0.6778;0.7889;0.8167;1.0" values="0;0;1;1;0;0"/>3 · the phone introduces them</text>
+    <text x="180" y="242" text-anchor="middle" opacity="0"><animate attributeName="opacity" dur="9s" repeatCount="indefinite" keyTimes="0.0;0.7833;0.8111;0.9778;1.0;1.0" values="0;0;1;1;0;0"/>4 · they connect directly; the phone is done</text>
+  </g>
+</svg>
+          <figcaption><b>Pairing.</b> The phone reaches each computer through an iroh relay. The connection is encrypted end to end to the key in that computer's QR code, so the relay can't read it.</figcaption>
+        </figure>
+        <figure class="dg">
+          <svg class="dg-anim" viewBox="0 0 360 230" role="img" aria-labelledby="dg2-t">
+  <title id="dg2-t">Data goes directly between the two computers through an end-to-end encrypted, hole-punched connection. The relay is only a fallback; the phone and the website are not involved.</title>
+  <path class="fallback" d="M62 92 L130 36 M230 36 L298 92"/>
+  <rect class="untrusted faded" x="125" y="8" width="110" height="38" rx="8"/>
+  <text x="180" y="24" text-anchor="middle" class="b faded">iroh relay</text>
+  <text x="180" y="38" text-anchor="middle" class="muted small">fallback only</text>
+  <text x="180" y="82" text-anchor="middle" class="okt b">direct · end-to-end encrypted</text>
+  <text x="180" y="96" text-anchor="middle" class="muted small">NAT hole-punched</text>
+  <rect class="pipe" x="100" y="108" width="160" height="20" rx="10"/>
+  <rect class="data" x="-6" y="-4" width="12" height="8" rx="2"><animateMotion dur="2.4s" begin="0.00s" repeatCount="indefinite" path="M108 118 H252"/></rect><rect class="data" x="-6" y="-4" width="12" height="8" rx="2"><animateMotion dur="2.4s" begin="-0.60s" repeatCount="indefinite" path="M108 118 H252"/></rect><rect class="data" x="-6" y="-4" width="12" height="8" rx="2"><animateMotion dur="2.4s" begin="-1.20s" repeatCount="indefinite" path="M108 118 H252"/></rect><rect class="data" x="-6" y="-4" width="12" height="8" rx="2"><animateMotion dur="2.4s" begin="-1.80s" repeatCount="indefinite" path="M108 118 H252"/></rect>
+  <g transform="translate(180 118)"><circle r="11" class="lockbg"/><path class="ok-stroke" fill="none" stroke-width="2" d="M-4 -2 V-5 A4 4 0 0 1 4 -5 V-2"/><rect class="ok" x="-6" y="-2" width="12" height="9" rx="2"/></g>
+  <g transform="translate(20 92)"><rect class="dev" width="80" height="52" rx="5"/><rect class="scr" x="5" y="5" width="70" height="42" rx="2"/><path class="dev" d="M-8 58 H88 L82 52 H-2 Z"/><use href="#dg-qr" x="28" y="14"/><text x="40" y="78" text-anchor="middle">laptop A</text></g>
+  <g transform="translate(260 92)"><rect class="dev" width="80" height="52" rx="5"/><rect class="scr" x="5" y="5" width="70" height="42" rx="2"/><path class="dev" d="M-8 58 H88 L82 52 H-2 Z"/><use href="#dg-qr" x="28" y="14"/><text x="40" y="78" text-anchor="middle">laptop B</text></g>
+  <g class="faded">
+    <rect class="dev" x="128" y="172" width="22" height="40" rx="4"/>
+    <rect class="untrusted" x="166" y="178" width="66" height="28" rx="6"/>
+    <text x="199" y="196" text-anchor="middle" class="small">qrtx.lol</text>
+  </g>
+  <text x="180" y="226" text-anchor="middle" class="muted small">phone and website: not in the data path</text>
+</svg>
+          <figcaption><b>Your data.</b> The two computers talk directly. Each accepts only the key the phone introduced. The phone can be closed.</figcaption>
+        </figure>
+      </div>
       <ul class="how">
         <li>Each computer starts an <a href="https://iroh.computer">iroh</a> endpoint. Its QR code holds the endpoint's public key, its relay, and a one-time secret.</li>
         <li>This page runs iroh in your browser. It dials each computer, checks it is talking to the key from the code, and proves it saw the code by sending the secret.</li>
         <li>Then it tells each computer about the other. They connect to each other directly, with NAT hole punching and a relay as fallback. The connection is end-to-end encrypted and only accepts the peer your phone introduced. Your data never goes through your phone or this website.</li>
         <li>This site is static files only. The ticket is in the URL fragment (<code>#…</code>), which browsers never send to the server.</li>
       </ul>
-      <p class="foot">Inspired by <a href="https://github.com/n0-computer/dumbpipe">dumbpipe</a>.</p>
+      <p class="foot">Open source (MIT / Apache-2.0) on <a href="https://github.com/magik6k/qrtx">GitHub</a>. Inspired by <a href="https://github.com/n0-computer/dumbpipe">dumbpipe</a>.</p>
     </section>
   </main>
   <canvas id="frame" hidden></canvas>
@@ -105,17 +169,19 @@
 
  Run qrtx on both machines and each prints a QR code. Scan one with your
  phone's camera, then scan the other from the page that opens. The machines
- then connect directly over an end-to-end encrypted iroh tunnel; your data
- never goes through the phone or this site.
+ then connect peer-to-peer over an end-to-end encrypted iroh tunnel; your
+ data never goes through the phone or this site.
+
+ [1mSend a file[0m [2m(nothing to install)[0m
+   [36mcurl -fsSL https://qrtx.lol/send | sh -s -- backup.tar[0m   [2m# sender[0m
+   [36mcurl -fsSL https://qrtx.lol/recv | sh -s -- backup.tar[0m   [2m# receiver[0m
 
  [1mSSH in[0m [2m(one session, no open ports)[0m
    [36mcurl -fsSL https://qrtx.lol/sshd | sh[0m                    [2m# server[0m
    [36mcurl -fsSL https://qrtx.lol/ssh | sh -s -- me@myserver[0m   [2m# laptop[0m
 
- [1mInstall[0m, then e.g. send a file
+ [1mInstall[0m
    [36mcurl -fsSL https://qrtx.lol/install | sh[0m
-   [36mqrtx < backup.tar[0m                                        [2m# sender[0m
-   [36mqrtx > backup.tar[0m                                        [2m# receiver[0m
 
  [2mMore: qrtx --help · https://github.com/magik6k/qrtx[0m
 

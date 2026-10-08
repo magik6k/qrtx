@@ -329,6 +329,21 @@ window.addEventListener("hashchange", () => {
   addTicket(href);
 });
 
+// diagrams: honour reduced motion by freezing them on their most telling frame
+const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)");
+function syncDiagrams() {
+  document.querySelectorAll("svg.dg-anim").forEach((svg, i) => {
+    if (reduceMotion.matches) {
+      svg.pauseAnimations();
+      svg.setCurrentTime(i === 0 ? 8 : 0.6);
+    } else {
+      svg.unpauseAnimations();
+    }
+  });
+}
+reduceMotion.addEventListener?.("change", syncDiagrams);
+syncDiagrams();
+
 // click a command to copy it
 document.querySelectorAll(".cmd").forEach((el) =>
   el.addEventListener("click", async () => {
