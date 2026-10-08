@@ -53,8 +53,8 @@ els.diagCopy.addEventListener("click", async () => {
 });
 
 const SLOT_HINTS = [
-  ["First computer", "Scan the QR code shown by <code>qrtx</code>"],
-  ["Second computer", "Scan the other QR code"],
+  ["First computer", "scan the QR code <code>qrtx</code> prints"],
+  ["Second computer", "scan the other one"],
 ];
 
 // phase: "collect" (scanning/connecting), "pairing", "done", "failed"

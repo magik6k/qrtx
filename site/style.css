@@ -14,7 +14,7 @@
   --err-bg: #fbe6e3;
   --code-bg: #efeee9;
   --violet: #7c5cff;
-  --radius: 14px;
+  --radius: 3px;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
 }
@@ -68,7 +68,7 @@ header h1 {
 .mark {
   width: 22px;
   height: 22px;
-  border-radius: 5px;
+  border-radius: 2px;
   background:
     linear-gradient(var(--text), var(--text)) 3px 3px / 7px 7px no-repeat,
     linear-gradient(var(--text), var(--text)) 12px 12px / 7px 7px no-repeat,
@@ -89,14 +89,14 @@ header .top { display: flex; align-items: center; justify-content: space-between
   text-decoration: none;
   padding: 6px 10px;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: 2px;
 }
 .gh:hover { color: var(--text); border-color: var(--muted); }
 .tagline { margin: 4px 0 20px; color: var(--muted); }
 .tagline a { color: inherit; }
 
 code, pre { font-family: var(--mono); font-size: 0.875em; }
-:not(pre) > code { background: var(--code-bg); padding: 1px 5px; border-radius: 5px; }
+:not(pre) > code { background: var(--code-bg); padding: 1px 5px; border-radius: 2px; }
 
 /* camera */
 #viewfinder {
@@ -112,7 +112,7 @@ code, pre { font-family: var(--mono); font-size: 0.875em; }
 .reticle {
   position: absolute;
   inset: 14%;
-  border-radius: 12px;
+  border-radius: 2px;
   box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.35);
   outline: 2px solid rgba(255, 255, 255, 0.85);
   transition: outline-color 0.15s;
@@ -145,7 +145,7 @@ code, pre { font-family: var(--mono); font-size: 0.875em; }
   place-items: center;
   width: 30px;
   height: 30px;
-  border-radius: 50%;
+  border-radius: 2px;
   border: 1.5px dashed var(--muted);
   color: var(--muted);
   font: 600 14px var(--mono);
@@ -159,7 +159,7 @@ code, pre { font-family: var(--mono); font-size: 0.875em; }
   font-size: 12px;
   font-weight: 600;
   padding: 3px 9px;
-  border-radius: 999px;
+  border-radius: 2px;
   white-space: nowrap;
 }
 .pill:empty { display: none; }
@@ -199,7 +199,7 @@ code, pre { font-family: var(--mono); font-size: 0.875em; }
 .actions { display: flex; gap: 10px; flex-wrap: wrap; }
 button {
   font: 600 16px var(--sans);
-  border-radius: 12px;
+  border-radius: 2px;
   padding: 13px 18px;
   border: 1px solid var(--line);
   background: var(--surface);
@@ -207,7 +207,7 @@ button {
   cursor: pointer;
 }
 button.primary { flex: 1; background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
-button.small { font-size: 14px; padding: 7px 12px; border-radius: 9px; }
+button.small { font-size: 14px; padding: 7px 12px; border-radius: 2px; }
 button:disabled { opacity: 0.5; cursor: default; }
 button[hidden] { display: none; }
 button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -220,7 +220,7 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
   min-width: 0;
   font: 14px var(--mono);
   padding: 11px 12px;
-  border-radius: 10px;
+  border-radius: 2px;
   border: 1px solid var(--line);
   background: var(--surface);
   color: var(--text);
@@ -234,7 +234,7 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
   max-height: 50vh;
   overflow: auto;
   padding: 10px;
-  border-radius: 10px;
+  border-radius: 2px;
   background: var(--code-bg);
   color: var(--text);
   font: 11px/1.45 var(--mono);
@@ -254,7 +254,7 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
   gap: 10px;
   margin: 6px 0;
   background: var(--code-bg);
-  border-radius: 10px;
+  border-radius: 2px;
   padding: 10px 12px;
   cursor: copy;
 }
@@ -316,3 +316,11 @@ figure.dg figcaption b { color: var(--text); }
 .how li { margin: 6px 0; }
 .foot { color: var(--muted); font-size: 14px; margin-top: 24px; }
 a { color: var(--accent); }
+
+/* terse, terminal-ish headings */
+h2, h3, summary, .slot .title, figure.dg figcaption b { font-family: var(--mono); letter-spacing: -0.01em; }
+#how h2, #setup h2 { font-size: 18px; margin: 28px 0 10px; }
+#setup h3 { color: var(--text); font-size: 14px; }
+.how { padding-left: 18px; font-size: 14px; color: var(--muted); }
+.how li { margin: 3px 0; }
+#how { margin-top: 28px; border-top: 1px solid var(--line); }
