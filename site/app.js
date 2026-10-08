@@ -1,5 +1,5 @@
 // qrtx scanner page: scan two codes, connect to both devices, introduce them.
-import init, { Node, parseTicket, aDials, decodeQr } from "./pkg/qrtx_web.js";
+import init, { Node, parseTicket, aDials, decodeQr, setLogger } from "./pkg/qrtx_web.js";
 
 const $ = (sel) => document.querySelector(sel);
 const els = {
@@ -14,7 +14,43 @@ const els = {
   pasteForm: $("#paste-form"),
   paste: $("#paste"),
   pasteBox: $("#paste-box"),
+  diag: $("#diag"),
+  diagLog: $("#diag-log"),
+  diagCopy: $("#diag-copy"),
 };
+
+// ---------- diagnostics ----------
+// Shown in the "Diagnostics" panel. Never put the ticket (or the page URL,
+// whose fragment holds it) in here: people paste this into public issues.
+
+const t0 = performance.now();
+const logLines = [];
+let logDrawQueued = false;
+function dlog(msg) {
+  logLines.push(`${((performance.now() - t0) / 1000).toFixed(2).padStart(7)}  ${msg}`);
+  if (logLines.length > 3000) logLines.splice(0, logLines.length - 3000);
+  if (!logDrawQueued) {
+    logDrawQueued = true;
+    setTimeout(() => {
+      logDrawQueued = false;
+      els.diagLog.textContent = logLines.join("\n");
+    }, 100);
+  }
+}
+window.addEventListener("error", (e) => dlog(`page error: ${e.message} (${e.filename}:${e.lineno})`));
+window.addEventListener("unhandledrejection", (e) => dlog(`unhandled rejection: ${errText(e.reason)}`));
+els.diagCopy.addEventListener("click", async () => {
+  const text = logLines.join("\n");
+  try {
+    await navigator.clipboard.writeText(text);
+    els.diagCopy.textContent = "Copied";
+  } catch {
+    // older browsers: select it so the user can copy by hand
+    getSelection().selectAllChildren(els.diagLog);
+    els.diagCopy.textContent = "Selected; copy it";
+  }
+  setTimeout(() => (els.diagCopy.textContent = "Copy log"), 1500);
+});
 
 const SLOT_HINTS = [
   ["First computer", "Scan the QR code shown by <code>qrtx</code>"],
@@ -109,9 +145,13 @@ function addTicket(text) {
 }
 
 async function connectSlot(i, ticket) {
+  const { short, role, relay } = state.slots[i].info;
+  const started = performance.now();
+  dlog(`slot ${i + 1}: connecting to ${short} (${role}, relay ${relay ?? "none"})`);
   try {
     const node = await nodePromise;
     const device = await node.connect(ticket);
+    dlog(`slot ${i + 1}: ${short} ok after ${((performance.now() - started) / 1000).toFixed(1)}s`);
     if (state.slots[i].ticket !== ticket) {
       device.close(); // replaced meanwhile
       return;
@@ -120,7 +160,9 @@ async function connectSlot(i, ticket) {
   } catch (e) {
     if (state.slots[i].ticket !== ticket) return;
     Object.assign(state.slots[i], { status: "error", label: "failed", error: errText(e) });
-    say("Couldn't connect. Check that qrtx is still running there, then scan again.", "err");
+    dlog(`slot ${i + 1}: FAILED after ${((performance.now() - started) / 1000).toFixed(1)}s: ${errText(e)}`);
+    say("Couldn't connect. Check that qrtx is still running there, then scan again. Details are under Diagnostics.", "err");
+    els.diag.open = true;
   }
   render();
   maybePair();
@@ -194,6 +236,8 @@ function setSlot(s, status, label, error = "") {
 }
 
 function fail(e) {
+  dlog(`pairing failed: ${errText(e)}`);
+  els.diag.open = true;
   state.phase = "failed";
   state.slots.forEach((s) => {
     if (s.status === "busy") setSlot(s, "error", "failed", errText(e));
@@ -366,15 +410,35 @@ async function boot() {
   // opened by scanning a code with the phone's camera app: the ticket is in the fragment
   const fromUrl = location.hash.length > 1 ? location.href : null;
   if (fromUrl) history.replaceState(null, "", location.pathname + location.search);
+  const keepDots = new URLSearchParams(location.search).has("relaydots");
+  dlog(`page ${location.origin}${location.pathname}${keepDots ? " (relaydots)" : ""}`);
+  dlog(`browser ${navigator.userAgent}`);
+  dlog(
+    `secure context ${isSecureContext}, WebAssembly ${typeof WebAssembly !== "undefined"}, WebSocket ${typeof WebSocket !== "undefined"}, ` +
+      `BarcodeDetector ${"BarcodeDetector" in window}, camera API ${!!navigator.mediaDevices?.getUserMedia}, online ${navigator.onLine}`,
+  );
   try {
     await init();
   } catch (e) {
+    dlog(`wasm init failed: ${errText(e)}`);
     say(`This browser can't run qrtx (${esc(errText(e))}).`, "err");
     els.scan.disabled = true;
+    els.diag.open = true;
     return;
   }
-  nodePromise = Node.create();
-  nodePromise.catch((e) => say(`Couldn't start networking: ${esc(errText(e))}`, "err"));
+  dlog(`wasm ready after ${((performance.now() - t0) / 1000).toFixed(2)}s`);
+  try {
+    setLogger((line) => dlog(line), "warn,iroh=debug,iroh_relay=debug,qrtx_web=debug");
+  } catch (e) {
+    dlog(`no rust logs: ${errText(e)}`);
+  }
+  nodePromise = Node.create(keepDots);
+  nodePromise.then((node) => dlog(`our endpoint ${node.id()}`));
+  nodePromise.catch((e) => {
+    dlog(`networking failed to start: ${errText(e)}`);
+    say(`Couldn't start networking: ${esc(errText(e))}`, "err");
+    els.diag.open = true;
+  });
   if (fromUrl && addTicket(fromUrl)) startScanner();
 }
 

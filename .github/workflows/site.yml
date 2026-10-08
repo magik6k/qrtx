@@ -87,6 +87,10 @@ jobs:
           sudo apt-get update && sudo apt-get install -y openssh-server
           gunzip -c site/dl/qrtx-linux-amd64.gz > qrtx && chmod +x qrtx
           CHROME=$(command -v google-chrome || command -v chromium) node tests/e2e.mjs ./qrtx site
+      - name: Pair from WebKit (Safari's engine)
+        run: |
+          sudo apt-get install -y python3-gi gir1.2-gtk-3.0 gir1.2-webkit2-4.1 xvfb
+          xvfb-run -a python3 tests/webkit.py ./qrtx
 
   deploy:
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'

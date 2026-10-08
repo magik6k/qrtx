@@ -226,6 +226,22 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
   color: var(--text);
 }
 
+#diag { margin-top: 6px; color: var(--muted); font-size: 15px; }
+#diag summary { cursor: pointer; padding: 4px 0; }
+#diag .note { margin: 6px 0; }
+#diag-log {
+  margin: 8px 0 0;
+  max-height: 50vh;
+  overflow: auto;
+  padding: 10px;
+  border-radius: 10px;
+  background: var(--code-bg);
+  color: var(--text);
+  font: 11px/1.45 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* docs */
 #setup { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 8px; }
 #setup h2 { font-size: 20px; margin: 24px 0 8px; }

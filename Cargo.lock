@@ -2412,6 +2412,9 @@ dependencies = [
  "rqrr",
  "serde",
  "serde-wasm-bindgen",
+ "tracing",
+ "tracing-subscriber",
+ "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
 ]

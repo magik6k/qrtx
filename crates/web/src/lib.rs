@@ -7,11 +7,15 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use anyhow::{Context, Result, anyhow, bail};
 use iroh::{
-    Endpoint,
+    Endpoint, RelayMode, RelayUrl,
     endpoint::{Connection, RecvStream, SendStream, presets},
 };
-use n0_future::time::timeout;
-use qrtx_proto::{ALPN_PAIR, DeviceMsg, PhoneMsg, Role, Ticket, encode_id, read_msg, write_msg};
+use n0_future::time::{Instant, timeout};
+use qrtx_proto::{
+    ALPN_PAIR, DeviceMsg, PhoneMsg, Role, Ticket, encode_id, endpoint_addr, read_msg, write_msg,
+};
+use tracing::{info, warn};
+use tracing_subscriber::{Layer, filter::Targets, fmt::MakeWriter, layer::SubscriberExt, util::SubscriberInitExt};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
@@ -23,6 +27,78 @@ const TUNNEL_TIMEOUT: Duration = Duration::from_secs(120);
 #[wasm_bindgen(start)]
 fn start() {
     console_error_panic_hook::set_once();
+}
+
+thread_local! {
+    static LOG_SINK: RefCell<Option<js_sys::Function>> = const { RefCell::new(None) };
+}
+
+/// One formatted log event, handed to JS when dropped.
+struct JsLine(Vec<u8>);
+
+impl std::io::Write for JsLine {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Drop for JsLine {
+    fn drop(&mut self) {
+        let line = String::from_utf8_lossy(&self.0);
+        let line = line.trim_end();
+        if line.is_empty() {
+            return;
+        }
+        LOG_SINK.with(|sink| {
+            if let Some(f) = &*sink.borrow() {
+                f.call1(&JsValue::NULL, &JsValue::from_str(line)).ok();
+            }
+        });
+    }
+}
+
+struct JsMakeWriter;
+
+impl<'a> MakeWriter<'a> for JsMakeWriter {
+    type Writer = JsLine;
+
+    fn make_writer(&'a self) -> JsLine {
+        JsLine(Vec::new())
+    }
+}
+
+/// Forward Rust logs (iroh's included) to `sink(line)`. `filter` is a
+/// tracing `Targets` string like `warn,iroh=debug`.
+#[wasm_bindgen(js_name = setLogger)]
+pub fn set_logger(sink: js_sys::Function, filter: &str) -> Result<(), JsValue> {
+    LOG_SINK.with(|s| *s.borrow_mut() = Some(sink));
+    let targets: Targets = filter.parse().map_err(|e| js_err(anyhow!("{e}")))?;
+    let layer = tracing_subscriber::fmt::layer()
+        .with_writer(JsMakeWriter)
+        .without_time()
+        .with_ansi(false)
+        .with_filter(targets);
+    tracing_subscriber::registry().with(layer).try_init().ok();
+    Ok(())
+}
+
+/// iroh's relay hostnames are fully qualified (`relay.example.`). Native code
+/// doesn't care, but browsers (WebKit in particular) can trip over the
+/// trailing dot in TLS/WebSocket URLs, so we drop it in the browser.
+fn browser_relay(url: RelayUrl, keep_dots: bool) -> RelayUrl {
+    if keep_dots {
+        return url;
+    }
+    let mut u: url::Url = url.into();
+    if let Some(host) = u.host_str().and_then(|h| h.strip_suffix('.')).map(str::to_owned) {
+        u.set_host(Some(&host)).ok();
+    }
+    u.into()
 }
 
 fn js_err(err: anyhow::Error) -> JsValue {
@@ -80,16 +156,51 @@ pub fn decode_qr(luma: &[u8], width: usize, height: usize) -> Option<String> {
 #[wasm_bindgen]
 pub struct Node {
     endpoint: Endpoint,
+    keep_dots: bool,
 }
 
 #[wasm_bindgen]
 impl Node {
-    pub async fn create() -> Result<Node, JsValue> {
+    /// `keep_dots` keeps relay hostnames as iroh has them (for diagnosis).
+    pub async fn create(keep_dots: bool) -> Result<Node, JsValue> {
+        let relays: Vec<RelayUrl> = iroh::defaults::prod::default_relay_map()
+            .urls::<Vec<_>>()
+            .into_iter()
+            .map(|u| browser_relay(u, keep_dots))
+            .collect();
+        info!("binding endpoint, relays: {}", relays.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(" "));
+        let started = Instant::now();
         let endpoint = Endpoint::builder(presets::N0)
+            .relay_mode(RelayMode::custom(relays))
             .bind()
             .await
-            .map_err(|e| js_err(e.into()))?;
-        Ok(Node { endpoint })
+            .map_err(|e| {
+                warn!("binding the endpoint failed: {e:#}");
+                js_err(e.into())
+            })?;
+        info!("endpoint {} bound in {:?}", endpoint.id().fmt_short(), started.elapsed());
+        // report whether we can reach any relay at all; without one nothing works
+        let ep = endpoint.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let started = Instant::now();
+            match timeout(Duration::from_secs(15), ep.online()).await {
+                Ok(()) => info!(
+                    "home relay {} connected after {:?}",
+                    ep.addr().relay_urls().next().map(|r| r.to_string()).unwrap_or_default(),
+                    started.elapsed()
+                ),
+                Err(_) => warn!(
+                    "no relay connection after 15s: this browser can't open a WebSocket to any iroh relay, so it can't reach your computers"
+                ),
+            }
+        });
+        Ok(Node { endpoint, keep_dots })
+    }
+
+    /// The relay this browser is connected through, if any.
+    #[wasm_bindgen(js_name = homeRelay)]
+    pub fn home_relay(&self) -> Option<String> {
+        self.endpoint.addr().relay_urls().next().map(|r| r.to_string())
     }
 
     pub fn id(&self) -> String {
@@ -110,10 +221,17 @@ impl Node {
     /// Resolves to a [`Device`].
     pub fn connect(&self, ticket: String) -> js_sys::Promise {
         let endpoint = self.endpoint.clone();
+        let keep_dots = self.keep_dots;
         future_to_promise(async move {
             let ticket: Ticket = ticket.parse().map_err(js_err)?;
-            let device = Device::connect(endpoint, ticket).await.map_err(js_err)?;
-            Ok(device.into())
+            let short = ticket.id.fmt_short();
+            match Device::connect(endpoint, ticket, keep_dots).await {
+                Ok(device) => Ok(device.into()),
+                Err(err) => {
+                    warn!("device {short}: {err:#}");
+                    Err(js_err(err))
+                }
+            }
         })
     }
 }
@@ -147,11 +265,20 @@ struct DeviceInfo<'a> {
 }
 
 impl Device {
-    async fn connect(endpoint: Endpoint, ticket: Ticket) -> Result<Device> {
-        let conn = timeout(CONNECT_TIMEOUT, endpoint.connect(ticket.addr(), ALPN_PAIR))
+    async fn connect(endpoint: Endpoint, ticket: Ticket, keep_dots: bool) -> Result<Device> {
+        let short = ticket.id.fmt_short();
+        let relay = ticket.relay.clone().map(|r| browser_relay(r, keep_dots));
+        info!(
+            "device {short}: dialing via relay {}",
+            relay.as_ref().map(|r| r.to_string()).unwrap_or_else(|| "(none, using discovery)".into())
+        );
+        let started = Instant::now();
+        let addr = endpoint_addr(ticket.id, relay);
+        let conn = timeout(CONNECT_TIMEOUT, endpoint.connect(addr, ALPN_PAIR))
             .await
             .context("timed out reaching the device; is qrtx still running there?")?
             .context("could not reach the device")?;
+        info!("device {short}: connected after {:?}", started.elapsed());
         let (mut send, mut recv) = conn.open_bi().await?;
         write_msg(
             &mut send,
@@ -174,6 +301,7 @@ impl Device {
             Some(other) => bail!("unexpected reply {other:?}"),
             None => bail!("the device hung up"),
         };
+        info!("device {short}: authenticated as {name:?} ({role}) after {:?}", started.elapsed());
         if role != ticket.role {
             bail!(
                 "device reports role {role} but its code says {}",
