@@ -134,14 +134,18 @@ export async function startChrome(video) {
   ];
   const proc = spawn(CHROME, args, { stdio: ["ignore", "ignore", "pipe"] });
   cleanups.push(() => proc.kill("SIGKILL"));
-  const wsUrl = await withTimeout(new Promise((resolve) => {
-    let buf = "";
+  // a cold start on CI runners can take a while; keep chrome's own words for the error
+  let chromeErr = "";
+  const wsUrl = await withTimeout(new Promise((resolve, reject) => {
     proc.stderr.on("data", (d) => {
-      buf += d;
-      const m = buf.match(/DevTools listening on (ws:\/\/\S+)/);
+      chromeErr += d;
+      const m = chromeErr.match(/DevTools listening on (ws:\/\/\S+)/);
       if (m) resolve(m[1]);
     });
-  }), 20_000, "chromium start");
+    proc.on("exit", (code) => reject(new Error(`chromium exited (${code}):\n${chromeErr.slice(-2000)}`)));
+  }), 60_000, "chromium start").catch((e) => {
+    throw new Error(`${e.message}\n--- chromium stderr ---\n${chromeErr.slice(-2000)}`);
+  });
   const port = new URL(wsUrl).port;
   const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
   const page = targets.find((t) => t.type === "page");
