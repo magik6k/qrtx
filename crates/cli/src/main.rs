@@ -1,5 +1,7 @@
 //! qrtx: like dumbpipe, but instead of copying a ticket between machines you
 //! scan a QR code on each of them with a phone, and the phone introduces them.
+mod transfer;
+
 use std::{
     io::{IsTerminal, Write as _},
     net::{SocketAddr, ToSocketAddrs},
@@ -19,6 +21,7 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler, Router},
 };
 use n0_future::StreamExt;
+use qrtx_proto::files::human_bytes;
 use qrtx_proto::{
     ALPN_PAIR, ALPN_PIPE, DEFAULT_SITE, DeviceMsg, HANDSHAKE, PhoneMsg, Role, Ticket, decode_id,
     endpoint_addr, read_msg, secret_matches, write_msg,
@@ -97,18 +100,28 @@ enum Command {
         #[arg(long)]
         addr: String,
     },
-    /// Send a file to the peer, which runs `qrtx recv FILE` (or `qrtx > FILE`).
-    Send {
-        /// The file to send.
-        file: PathBuf,
-    },
-    /// Receive a file from the peer, which runs `qrtx send FILE` (or `qrtx < FILE`).
+    /// Send files and directories to the peer, which runs `qrtx recv`.
     ///
-    /// Data goes to FILE.part first and is renamed to FILE once complete.
+    /// A single file also works towards a plain `qrtx > FILE`. Sending a
+    /// directory asks for confirmation first.
+    Send {
+        /// Files and directories to send, e.g. `*.jpg notes.txt photos/`.
+        #[arg(required = true, value_name = "PATH")]
+        paths: Vec<PathBuf>,
+        /// Don't ask before sending directories.
+        #[arg(short, long)]
+        yes: bool,
+    },
+    /// Receive files from the peer, which runs `qrtx send` (or the phone).
+    ///
+    /// Files land under DEST (default: the current directory); a single
+    /// incoming file can be renamed with `qrtx recv NAME`, and a trailing `/`
+    /// always means a directory. Each file is written to FILE.part and renamed
+    /// once complete. A plain `qrtx < FILE` on the other side needs a file name here.
     Recv {
-        /// Where to save the file.
-        file: PathBuf,
-        /// Overwrite FILE if it already exists.
+        /// Where to save: a directory, or a file name for a single file.
+        dest: Option<PathBuf>,
+        /// Overwrite existing files.
         #[arg(long)]
         force: bool,
     },
@@ -140,10 +153,9 @@ enum Command {
 impl Command {
     fn role(&self) -> Role {
         match self {
-            Command::Pipe { .. }
-            | Command::Send { .. }
-            | Command::Recv { .. }
-            | Command::Ssh { .. } => Role::Pipe,
+            Command::Pipe { .. } | Command::Ssh { .. } => Role::Pipe,
+            Command::Send { .. } => Role::Send,
+            Command::Recv { .. } => Role::Recv,
             Command::ListenTcp { .. } | Command::Sshd { .. } => Role::ListenTcp,
             Command::ConnectTcp { .. } => Role::ConnectTcp,
         }
@@ -153,8 +165,9 @@ impl Command {
         match self {
             Command::Pipe { ssh_proxy: false } => "stdin/stdout".into(),
             Command::Pipe { ssh_proxy: true } | Command::Ssh { .. } => "ssh client".into(),
-            Command::Send { file } => format!("sends {}", file_name(file)),
-            Command::Recv { file, .. } => format!("receives into {}", file_name(file)),
+            Command::Send { .. } => "sends files".into(),
+            Command::Recv { dest: None, .. } => "receives files here".into(),
+            Command::Recv { dest: Some(d), .. } => format!("receives into {}", d.display()),
             Command::ListenTcp { host, once: false } => format!("serves {host}"),
             Command::ListenTcp { host, once: true } => format!("serves {host}, one connection"),
             Command::ConnectTcp { addr } => format!("listens on {addr}"),
@@ -194,6 +207,8 @@ struct Device {
     detail: String,
     /// The only endpoint allowed on [`ALPN_PIPE`]. Set once, by the phone.
     peer: OnceLock<Peer>,
+    /// The peer must have this role, or pairing fails with this message.
+    needs_peer: Option<(Role, String)>,
     peer_tx: mpsc::Sender<Peer>,
     status: watch::Sender<Option<TunnelStatus>>,
     tunnel_tx: mpsc::Sender<Connection>,
@@ -287,6 +302,11 @@ impl Device {
             }
             Ok(_) => {}
         }
+        if let Some((needed, why)) = &self.needs_peer
+            && role != *needed
+        {
+            bail!("{why}");
+        }
         let relay = relay
             .map(|r| r.parse::<RelayUrl>())
             .transpose()
@@ -379,21 +399,6 @@ fn part_path(file: &Path) -> PathBuf {
     let mut part = file.as_os_str().to_owned();
     part.push(".part");
     part.into()
-}
-
-fn human_bytes(n: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut v = n as f64;
-    let mut unit = 0;
-    while v >= 1024.0 && unit < UNITS.len() - 1 {
-        v /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{n} B")
-    } else {
-        format!("{v:.1} {}", UNITS[unit])
-    }
 }
 
 /// Counts the bytes read from or written to the wrapped stream.
@@ -577,29 +582,72 @@ async fn run(cli: Cli) -> Result<()> {
         other => other,
     };
 
-    // fail early on bad local addresses, before anybody scans anything
+    // fail early on bad local addresses and files, before anybody scans anything
     let mut tcp_listener = None;
     let mut tcp_target = Vec::new();
+    let mut job = None;
+    let mut needs_peer = None;
     match &command {
         Command::Pipe { .. } => {}
-        Command::Send { file } => {
-            let meta = std::fs::metadata(file)
-                .with_context(|| format!("can't read {}", file.display()))?;
-            anyhow::ensure!(meta.is_file(), "{} is not a file", file.display());
-            std::fs::File::open(file).with_context(|| format!("can't read {}", file.display()))?;
-            detail = format!("sends {} ({})", file_name(file), human_bytes(meta.len()));
+        Command::Send { paths, yes } => {
+            let out = transfer::Outgoing::scan(paths)?;
+            if out.skipped > 0 {
+                status(format_args!(
+                    "skipping {} symlink(s) or special file(s) inside the directories",
+                    out.skipped
+                ));
+            }
+            if out.has_dirs()
+                && !yes
+                && !transfer::confirm(&format!("send {}?", out.manifest.summary()))?
+            {
+                bail!("cancelled");
+            }
+            detail = format!("sends {}", out.manifest.summary());
+            if out.single_file().is_none() {
+                needs_peer = Some((
+                    Role::Recv,
+                    "this sends several files or a directory; run `qrtx recv` on the other side"
+                        .to_owned(),
+                ));
+            }
+            job = Some(FileJob::Send(out));
         }
-        Command::Recv { file, force } => {
-            anyhow::ensure!(
-                *force || !file.exists(),
-                "{} already exists (use --force to overwrite)",
-                file.display()
-            );
-            // make sure we can write there before anybody scans anything
-            let part = part_path(file);
-            std::fs::File::create(&part)
-                .with_context(|| format!("can't write {}", part.display()))?;
-            std::fs::remove_file(&part).ok();
+        Command::Recv { dest, force } => {
+            let names_needed = match dest {
+                // a file name: single file, from anyone
+                Some(d) if !d.is_dir() && !d.to_string_lossy().ends_with('/') => {
+                    anyhow::ensure!(
+                        *force || !d.exists(),
+                        "{} already exists (use --force to overwrite)",
+                        d.display()
+                    );
+                    let part = part_path(d);
+                    std::fs::File::create(&part)
+                        .with_context(|| format!("can't write {}", part.display()))?;
+                    std::fs::remove_file(&part).ok();
+                    false
+                }
+                _ => true,
+            };
+            if names_needed {
+                // a directory: the sender has to tell us the names
+                let dir = dest.clone().unwrap_or_else(|| PathBuf::from("."));
+                if dir.exists() {
+                    let probe = dir.join(".qrtx-write-test.part");
+                    std::fs::File::create(&probe)
+                        .with_context(|| format!("can't write to {}", dir.display()))?;
+                    std::fs::remove_file(&probe).ok();
+                }
+                needs_peer = Some((
+                    Role::Send,
+                    "the other side is a plain pipe; give `qrtx recv` a file name".to_owned(),
+                ));
+            }
+            job = Some(FileJob::Recv {
+                dest: dest.clone(),
+                force: *force,
+            });
         }
         Command::ListenTcp { host, .. } => {
             tcp_target = host
@@ -644,6 +692,7 @@ async fn run(cli: Cli) -> Result<()> {
         name,
         detail: detail.clone(),
         peer: OnceLock::new(),
+        needs_peer,
         peer_tx,
         status: watch::Sender::new(None),
         tunnel_tx,
@@ -675,10 +724,11 @@ async fn run(cli: Cli) -> Result<()> {
         peer.role
     ));
 
+    let job = job.as_ref();
     let res = if peer.dial {
-        run_dialer(&endpoint, &device, &peer, &command, tcp_listener).await
+        run_dialer(&endpoint, &device, &peer, &command, job, tcp_listener).await
     } else {
-        run_acceptor(&device, &peer, &command, &mut tunnel_rx, tcp_target).await
+        run_acceptor(&device, &peer, &command, job, &mut tunnel_rx, tcp_target).await
     };
     if let Err(err) = &res {
         device.report(TunnelStatus::Failed(format!("{}: {err:#}", device.name)));
@@ -755,6 +805,7 @@ async fn run_dialer(
     device: &Device,
     peer: &Peer,
     command: &Command,
+    job: Option<&FileJob>,
     tcp_listener: Option<TcpListener>,
 ) -> Result<()> {
     let conn = dial(endpoint, peer).await?;
@@ -767,7 +818,7 @@ async fn run_dialer(
             }
             let (mut send, recv) = conn.open_bi().await?;
             send.write_all(&HANDSHAKE).await?;
-            forward_pipe(&conn, send, recv, command).await?;
+            forward_pipe(&conn, send, recv, peer.role, job).await?;
             close(&conn);
             Ok(())
         }
@@ -819,6 +870,7 @@ async fn run_acceptor(
     device: &Device,
     peer: &Peer,
     command: &Command,
+    job: Option<&FileJob>,
     tunnel_rx: &mut mpsc::Receiver<Connection>,
     tcp_target: Vec<SocketAddr>,
 ) -> Result<()> {
@@ -831,7 +883,7 @@ async fn run_acceptor(
         Command::Pipe { .. } | Command::Send { .. } | Command::Recv { .. } => {
             let (send, mut recv) = conn.accept_bi().await?;
             read_handshake(&mut recv).await?;
-            forward_pipe(&conn, send, recv, command).await?;
+            forward_pipe(&conn, send, recv, peer.role, job).await?;
             close(&conn);
             Ok(())
         }
@@ -958,15 +1010,34 @@ async fn forward_bidi(
     res.map(|_| ())
 }
 
-/// Pipe-shaped modes: stdin/stdout, or a file for `send`/`recv`.
+/// What `send`/`recv` work on, prepared before the QR code is shown.
+#[derive(Debug)]
+enum FileJob {
+    Send(transfer::Outgoing),
+    Recv { dest: Option<PathBuf>, force: bool },
+}
+
+/// Pipe-shaped modes: stdin/stdout, or files for `send`/`recv`. Between a
+/// sender and a receiver (computer or phone) files go in the framed format;
+/// towards a plain pipe a single file goes raw.
 async fn forward_pipe(
     conn: &Connection,
-    send: SendStream,
-    recv: RecvStream,
-    command: &Command,
+    mut send: SendStream,
+    mut recv: RecvStream,
+    peer_role: Role,
+    job: Option<&FileJob>,
 ) -> Result<()> {
-    match command {
-        Command::Send { file } => {
+    match job {
+        Some(FileJob::Send(out)) if peer_role == Role::Recv => {
+            transfer::send_files(&mut send, &mut recv, out).await
+        }
+        Some(FileJob::Recv { dest, force }) if peer_role == Role::Send => {
+            transfer::recv_files(&mut send, &mut recv, dest.as_deref(), *force).await
+        }
+        Some(FileJob::Send(out)) => {
+            let file = out
+                .single_file()
+                .context("only a single file can go to a plain pipe")?;
             let f = tokio::fs::File::open(file).await?;
             let size = f.metadata().await?.len();
             let progress = Progress::start("sending", "sent", file_name(file), Some(size));
@@ -975,7 +1046,10 @@ async fn forward_pipe(
             progress.finish();
             Ok(())
         }
-        Command::Recv { file, .. } => {
+        Some(FileJob::Recv { dest, .. }) => {
+            let file = dest
+                .as_deref()
+                .context("a plain pipe needs `qrtx recv FILE`")?;
             let part = part_path(file);
             let f = tokio::fs::File::create(&part)
                 .await
@@ -1000,7 +1074,7 @@ async fn forward_pipe(
             progress.finish();
             Ok(())
         }
-        _ => {
+        None => {
             let stdin_is_tty = std::io::stdin().is_terminal();
             forward_io(
                 conn,

@@ -8,7 +8,7 @@
 // needs: chromium (or $CHROME), network access to the n0 relays
 import { spawn, execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, statSync, readdirSync, chmodSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import { tmpdir } from "node:os";
@@ -412,7 +412,152 @@ async function curlScenario() {
   log("ok");
 }
 
+const sha = (buf) => createHash("sha256").update(buf).digest("hex");
+
+/** Every file under `dir` as {relative path: sha256}, plus directories as "dir". */
+function tree(dir, base = dir, out = {}) {
+  for (const name of readdirSync(dir).sort()) {
+    const p = path.join(dir, name), rel = path.relative(base, p);
+    if (statSync(p).isDirectory()) {
+      out[rel + "/"] = "dir";
+      tree(p, base, out);
+    } else out[rel] = sha(readFileSync(p));
+  }
+  return out;
+}
+
+async function filesScenario(site) {
+  log("== send several files and a directory to `qrtx recv DIR/`, then refuse a conflicting second run");
+  const dir = path.join(tmp, "files"), src = path.join(dir, "src");
+  mkdirSync(path.join(src, "photos", "sub", "empty"), { recursive: true });
+  writeFileSync(path.join(src, "a.txt"), randomBytes(100_000));
+  writeFileSync(path.join(src, "run.sh"), "#!/bin/sh\necho hi\n");
+  chmodSync(path.join(src, "run.sh"), 0o755);
+  writeFileSync(path.join(src, "photos", "1.jpg"), randomBytes(2_000_000));
+  writeFileSync(path.join(src, "photos", "sub", "2.jpg"), randomBytes(300_000));
+  const out = path.join(dir, "out");
+  const run = async () => {
+    const sender = await startDevice("e2e-sender", ["send", "-y", path.join(src, "a.txt"), path.join(src, "run.sh"), path.join(src, "photos")], site);
+    const receiver = await startDevice("e2e-receiver", ["recv", out + "/"], site);
+    await pairViaPage(site, sender.url, receiver.url);
+    const codes = await withTimeout(Promise.all([sender.exited, receiver.exited]), 60_000, "send/recv to exit");
+    return { codes, sender, receiver };
+  };
+  const first = await run();
+  if (first.codes.some((c) => c !== 0)) throw new Error(`exit codes ${first.codes}\n${first.sender.stderr}\n${first.receiver.stderr}`);
+  const want = tree(src), got = tree(out);
+  if (JSON.stringify(want) !== JSON.stringify(got)) throw new Error(`trees differ:\n${JSON.stringify(want)}\n${JSON.stringify(got)}`);
+  if (!(statSync(path.join(out, "run.sh")).mode & 0o100)) throw new Error("exec bit lost");
+  log(`ok: ${Object.keys(got).length} entries identical (incl. empty dir, exec bit)`);
+  const second = await run();
+  if (second.codes[0] === 0 || !/refused: .*already exists/.test(second.sender.stderr)) {
+    throw new Error(`second run should be refused: ${second.codes}\n${second.sender.stderr}`);
+  }
+  log("ok: conflicting second transfer refused before sending");
+}
+
+/** Start the page, add one code, wait until the slot is verified. */
+async function pageWithDevice(site, url) {
+  const chrome = await startChrome(null);
+  await chrome.send("Page.navigate", { url: site });
+  await withTimeout((async () => { while (!(await chrome.evaluate("!!window.qrtx").catch(() => false))) await sleep(100); })(), 20_000, "page load");
+  await chrome.evaluate(`window.qrtx.addTicket(${JSON.stringify(url)})`);
+  await withTimeout((async () => {
+    while ((await chrome.evaluate("window.qrtx.state.slots[0].status")) !== "ok") await sleep(150);
+  })(), 30_000, "device verified");
+  return chrome;
+}
+
+async function waitPhase(chrome, phase) {
+  await withTimeout((async () => {
+    for (;;) {
+      const s = await chrome.evaluate("JSON.stringify({p: window.qrtx.state.phase, m: document.querySelector('#message').textContent})");
+      const { p, m } = JSON.parse(s);
+      if (p === phase) return;
+      if (p === "failed") throw new Error(`failed: ${m}`);
+      await sleep(200);
+    }
+  })(), 60_000, `phase ${phase}`);
+}
+
+async function phoneRecvScenario(site) {
+  log("== the phone receives two files from `qrtx send`");
+  const dir = path.join(tmp, "phone-recv");
+  mkdirSync(dir);
+  const files = { "a.bin": randomBytes(1_500_000), "notes.txt": Buffer.from("hello from qrtx\n") };
+  for (const [n, b] of Object.entries(files)) writeFileSync(path.join(dir, n), b);
+  const sender = await startDevice("e2e-sender", ["send", ...Object.keys(files).map((n) => path.join(dir, n))], site);
+  const chrome = await pageWithDevice(site, sender.url);
+  await chrome.evaluate("document.querySelector('#direct-recv').click()");
+  await waitPhase(chrome, "done");
+  const got = JSON.parse(await chrome.evaluate(`(async () => JSON.stringify(Object.fromEntries(await Promise.all(
+    window.qrtx.state.received.map(async (r) => [r.path, [...new Uint8Array(await crypto.subtle.digest("SHA-256", await r.file.arrayBuffer()))].map((b) => b.toString(16).padStart(2, "0")).join("")])))))()`));
+  const links = await chrome.evaluate("document.querySelectorAll('#received a[download]').length");
+  chrome.close();
+  for (const [n, b] of Object.entries(files)) if (got[n] !== sha(b)) throw new Error(`${n} differs in the browser`);
+  const code = await withTimeout(sender.exited, 15_000, "sender exit");
+  if (code !== 0) throw new Error(`sender exited ${code}\n${sender.stderr}`);
+  log(`ok: ${Object.keys(got).length} files identical in the browser, ${links} save links, sender exited 0`);
+}
+
+async function phoneSendScenario(site) {
+  log("== the phone sends two files to `qrtx recv DIR/` through the file picker");
+  const dir = path.join(tmp, "phone-send"), out = path.join(dir, "out");
+  mkdirSync(dir);
+  const files = { "photo.jpg": randomBytes(2_500_000), "doc.pdf": randomBytes(10_000) };
+  for (const [n, b] of Object.entries(files)) writeFileSync(path.join(dir, n), b);
+  const receiver = await startDevice("e2e-receiver", ["recv", out + "/"], site);
+  const chrome = await pageWithDevice(site, receiver.url);
+  const { root } = await chrome.send("DOM.getDocument");
+  const { nodeId } = await chrome.send("DOM.querySelector", { nodeId: root.nodeId, selector: "#direct-files" });
+  await chrome.send("DOM.setFileInputFiles", { nodeId, files: Object.keys(files).map((n) => path.join(dir, n)) });
+  await waitPhase(chrome, "done");
+  chrome.close();
+  const code = await withTimeout(receiver.exited, 15_000, "receiver exit");
+  if (code !== 0) throw new Error(`receiver exited ${code}\n${receiver.stderr}`);
+  for (const [n, b] of Object.entries(files)) if (!readFileSync(path.join(out, n)).equals(b)) throw new Error(`${n} differs on disk`);
+  log("ok: both files on disk and identical, receiver exited 0");
+}
+
+async function pipeCompatScenario(site) {
+  log("== send/recv with a plain pipe on the other side (single file), and a refused multi-file send");
+  const dir = path.join(tmp, "compat");
+  mkdirSync(dir);
+  const payload = randomBytes(700_000);
+  writeFileSync(path.join(dir, "one.bin"), payload);
+  writeFileSync(path.join(dir, "two.bin"), payload);
+  // send -> plain pipe stdout
+  let a = await startDevice("e2e-send", ["send", path.join(dir, "one.bin")], site);
+  let b = await startDevice("e2e-pipe", ["pipe"], site, { stdin: "pipe" });
+  b.proc.stdin.end();
+  await pairViaPage(site, a.url, b.url);
+  let codes = await withTimeout(Promise.all([a.exited, b.exited]), 60_000, "send -> pipe");
+  if (codes.some((c) => c !== 0) || !Buffer.concat(b.stdout).equals(payload)) throw new Error(`send -> pipe failed ${codes}\n${a.stderr}\n${b.stderr}`);
+  // plain pipe stdin -> recv FILE
+  const out = path.join(dir, "got.bin");
+  a = await startDevice("e2e-pipe", ["pipe"], site, { stdin: "pipe" });
+  a.proc.stdin.end(payload);
+  b = await startDevice("e2e-recv", ["recv", out], site);
+  await pairViaPage(site, a.url, b.url);
+  codes = await withTimeout(Promise.all([a.exited, b.exited]), 60_000, "pipe -> recv");
+  if (codes.some((c) => c !== 0) || !readFileSync(out).equals(payload)) throw new Error(`pipe -> recv failed ${codes}\n${a.stderr}\n${b.stderr}`);
+  // two files can't go to a plain pipe: refused while pairing
+  a = await startDevice("e2e-send2", ["send", path.join(dir, "one.bin"), path.join(dir, "two.bin")], site);
+  b = await startDevice("e2e-pipe", ["pipe"], site, { stdin: "pipe" });
+  try {
+    await pairViaPage(site, a.url, b.url);
+    throw new Error("multi-file send to a pipe should be refused");
+  } catch (e) {
+    if (!/qrtx recv/.test(e.message)) throw e;
+  }
+  a.proc.kill("SIGINT");
+  b.proc.kill("SIGINT");
+  log("ok: send -> pipe, pipe -> recv FILE, and multi-file -> pipe refused with a hint");
+}
+
 const scenarios = {
+  compat: pipeCompatScenario,
+  files: filesScenario, "phone-recv": phoneRecvScenario, "phone-send": phoneSendScenario,
   curl: curlScenario, tcp: tcpScenario, pipe: pipeScenario, roles: wrongRolesScenario,
   ssh: sshScenario, hup: hangupScenario, scripts: scriptsScenario,
 };

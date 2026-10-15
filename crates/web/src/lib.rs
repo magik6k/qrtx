@@ -5,18 +5,22 @@
 //! then connect to each other directly.
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use iroh::{
     Endpoint, RelayMode, RelayUrl,
     endpoint::{Connection, RecvStream, SendStream, presets},
 };
 use n0_future::time::{Instant, timeout};
 use qrtx_proto::{
-    ALPN_PAIR, DeviceMsg, PhoneMsg, Role, Ticket, encode_id, endpoint_addr, read_msg, write_msg,
+    ALPN_PAIR, ALPN_PIPE, DeviceMsg, HANDSHAKE, PhoneMsg, Role, Ticket, encode_id, endpoint_addr,
+    files::{Entry, MAX_MANIFEST, Manifest, Reply},
+    read_msg, read_msg_max, write_msg, write_msg_max,
 };
-use tracing::{info, warn};
-use tracing_subscriber::{Layer, filter::Targets, fmt::MakeWriter, layer::SubscriberExt, util::SubscriberInitExt};
 use serde::Serialize;
+use tracing::{info, warn};
+use tracing_subscriber::{
+    Layer, filter::Targets, fmt::MakeWriter, layer::SubscriberExt, util::SubscriberInitExt,
+};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 
@@ -95,7 +99,11 @@ fn browser_relay(url: RelayUrl, keep_dots: bool) -> RelayUrl {
         return url;
     }
     let mut u: url::Url = url.into();
-    if let Some(host) = u.host_str().and_then(|h| h.strip_suffix('.')).map(str::to_owned) {
+    if let Some(host) = u
+        .host_str()
+        .and_then(|h| h.strip_suffix('.'))
+        .map(str::to_owned)
+    {
         u.set_host(Some(&host)).ok();
     }
     u.into()
@@ -168,7 +176,14 @@ impl Node {
             .into_iter()
             .map(|u| browser_relay(u, keep_dots))
             .collect();
-        info!("binding endpoint, relays: {}", relays.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(" "));
+        info!(
+            "binding endpoint, relays: {}",
+            relays
+                .iter()
+                .map(|r| r.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
         let started = Instant::now();
         let endpoint = Endpoint::builder(presets::N0)
             .relay_mode(RelayMode::custom(relays))
@@ -178,7 +193,11 @@ impl Node {
                 warn!("binding the endpoint failed: {e:#}");
                 js_err(e.into())
             })?;
-        info!("endpoint {} bound in {:?}", endpoint.id().fmt_short(), started.elapsed());
+        info!(
+            "endpoint {} bound in {:?}",
+            endpoint.id().fmt_short(),
+            started.elapsed()
+        );
         // report whether we can reach any relay at all; without one nothing works
         let ep = endpoint.clone();
         wasm_bindgen_futures::spawn_local(async move {
@@ -186,7 +205,11 @@ impl Node {
             match timeout(Duration::from_secs(15), ep.online()).await {
                 Ok(()) => info!(
                     "home relay {} connected after {:?}",
-                    ep.addr().relay_urls().next().map(|r| r.to_string()).unwrap_or_default(),
+                    ep.addr()
+                        .relay_urls()
+                        .next()
+                        .map(|r| r.to_string())
+                        .unwrap_or_default(),
                     started.elapsed()
                 ),
                 Err(_) => warn!(
@@ -194,13 +217,20 @@ impl Node {
                 ),
             }
         });
-        Ok(Node { endpoint, keep_dots })
+        Ok(Node {
+            endpoint,
+            keep_dots,
+        })
     }
 
     /// The relay this browser is connected through, if any.
     #[wasm_bindgen(js_name = homeRelay)]
     pub fn home_relay(&self) -> Option<String> {
-        self.endpoint.addr().relay_urls().next().map(|r| r.to_string())
+        self.endpoint
+            .addr()
+            .relay_urls()
+            .next()
+            .map(|r| r.to_string())
     }
 
     pub fn id(&self) -> String {
@@ -270,7 +300,10 @@ impl Device {
         let relay = ticket.relay.clone().map(|r| browser_relay(r, keep_dots));
         info!(
             "device {short}: dialing via relay {}",
-            relay.as_ref().map(|r| r.to_string()).unwrap_or_else(|| "(none, using discovery)".into())
+            relay
+                .as_ref()
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "(none, using discovery)".into())
         );
         let started = Instant::now();
         let addr = endpoint_addr(ticket.id, relay);
@@ -301,7 +334,10 @@ impl Device {
             Some(other) => bail!("unexpected reply {other:?}"),
             None => bail!("the device hung up"),
         };
-        info!("device {short}: authenticated as {name:?} ({role}) after {:?}", started.elapsed());
+        info!(
+            "device {short}: authenticated as {name:?} ({role}) after {:?}",
+            started.elapsed()
+        );
         if role != ticket.role {
             bail!(
                 "device reports role {role} but its code says {}",
@@ -417,5 +453,304 @@ impl Device {
             send.finish().ok();
         }
         self.inner.conn.close(0u32.into(), b"bye");
+    }
+
+    /// Make the phone itself this device's peer: `role` is what the phone
+    /// does, `"recv"` (device sends to us) or `"send"`. The phone dials.
+    #[wasm_bindgen(js_name = pairWithPhone)]
+    pub fn pair_with_phone(&self, node: &Node, role: JsValue) -> js_sys::Promise {
+        let this = self.clone();
+        let endpoint = node.endpoint.clone();
+        future_to_promise(async move {
+            let role: Role =
+                serde_wasm_bindgen::from_value(role).map_err(|e| js_err(anyhow!("{e}")))?;
+            let msg = PhoneMsg::Pair {
+                id: encode_id(&endpoint.id()),
+                relay: endpoint.addr().relay_urls().next().map(|r| r.to_string()),
+                role,
+                name: "phone".into(),
+                dial: false,
+            };
+            this.with_streams(async |send, recv| {
+                write_msg(send, &msg).await?;
+                match Self::reply(recv, REPLY_TIMEOUT).await? {
+                    DeviceMsg::Ready => Ok(()),
+                    other => bail!("unexpected reply {other:?}"),
+                }
+            })
+            .await
+            .map_err(js_err)?;
+            Ok(JsValue::TRUE)
+        })
+    }
+
+    /// Receive what the device sends. `on_event` gets `{t: "manifest", summary,
+    /// total, files, entries}`, `{t: "file", path, size}`, each chunk of the
+    /// current file as a `Uint8Array`, and `{t: "progress", bytes}`.
+    #[wasm_bindgen(js_name = receiveFiles)]
+    pub fn receive_files(&self, node: &Node, on_event: js_sys::Function) -> js_sys::Promise {
+        let this = self.clone();
+        let (endpoint, keep_dots) = (node.endpoint.clone(), node.keep_dots);
+        future_to_promise(async move {
+            let bytes = this
+                .receive(endpoint, keep_dots, on_event)
+                .await
+                .map_err(|e| {
+                    warn!("receiving failed: {e:#}");
+                    js_err(e)
+                })?;
+            Ok(JsValue::from_f64(bytes as f64))
+        })
+    }
+
+    /// Send browser `File`s to the device. `on_event` gets `{t: "progress", bytes, total}`.
+    #[wasm_bindgen(js_name = sendFiles)]
+    pub fn send_files(
+        &self,
+        node: &Node,
+        files: js_sys::Array,
+        on_event: js_sys::Function,
+    ) -> js_sys::Promise {
+        let this = self.clone();
+        let (endpoint, keep_dots) = (node.endpoint.clone(), node.keep_dots);
+        future_to_promise(async move {
+            let bytes = this
+                .send(endpoint, keep_dots, files, on_event)
+                .await
+                .map_err(|e| {
+                    warn!("sending failed: {e:#}");
+                    js_err(e)
+                })?;
+            Ok(JsValue::from_f64(bytes as f64))
+        })
+    }
+}
+
+const CHUNK: usize = 1 << 20;
+
+fn emit(cb: &js_sys::Function, value: &JsValue) {
+    cb.call1(&JsValue::NULL, value).ok();
+}
+
+#[derive(Serialize)]
+struct Progress {
+    t: &'static str,
+    bytes: u64,
+    total: u64,
+}
+
+impl Device {
+    /// Open the tunnel to the device ourselves (it was told to expect us).
+    async fn dial_pipe(
+        &self,
+        endpoint: &Endpoint,
+        keep_dots: bool,
+    ) -> Result<(Connection, SendStream, RecvStream)> {
+        let t = &self.inner.ticket;
+        let addr = endpoint_addr(t.id, t.relay.clone().map(|r| browser_relay(r, keep_dots)));
+        let conn = timeout(CONNECT_TIMEOUT, endpoint.connect(addr, ALPN_PIPE))
+            .await
+            .context("timed out opening the transfer")?
+            .context("could not open the transfer")?;
+        let (mut send, recv) = conn.open_bi().await?;
+        send.write_all(&HANDSHAKE).await?;
+        Ok((conn, send, recv))
+    }
+
+    async fn receive(
+        &self,
+        endpoint: Endpoint,
+        keep_dots: bool,
+        cb: js_sys::Function,
+    ) -> Result<u64> {
+        let (conn, mut send, mut recv) = self.dial_pipe(&endpoint, keep_dots).await?;
+        let m: Manifest = read_msg_max(&mut recv, MAX_MANIFEST)
+            .await?
+            .context("the device hung up")?;
+        if let Err(err) = m.validate() {
+            write_msg(
+                &mut send,
+                &Reply::Reject {
+                    message: format!("{err:#}"),
+                },
+            )
+            .await
+            .ok();
+            return Err(err);
+        }
+        let total = m.total_bytes();
+        info!("receiving {}", m.summary());
+        #[derive(Serialize)]
+        struct ManifestEv<'a> {
+            t: &'static str,
+            summary: String,
+            total: u64,
+            files: usize,
+            entries: &'a [Entry],
+        }
+        emit(
+            &cb,
+            &to_js(&ManifestEv {
+                t: "manifest",
+                summary: m.summary(),
+                total,
+                files: m.file_count(),
+                entries: &m.entries,
+            }),
+        );
+        write_msg(&mut send, &Reply::Accept).await?;
+        let mut buf = vec![0u8; 64 * 1024];
+        let (mut done, mut reported) = (0u64, 0u64);
+        for e in m.entries.iter().filter(|e| !e.dir) {
+            #[derive(Serialize)]
+            struct FileEv<'a> {
+                t: &'static str,
+                path: &'a str,
+                size: u64,
+            }
+            emit(
+                &cb,
+                &to_js(&FileEv {
+                    t: "file",
+                    path: &e.path,
+                    size: e.size,
+                }),
+            );
+            let mut left = e.size;
+            while left > 0 {
+                let want = (left as usize).min(buf.len());
+                let n = recv
+                    .read(&mut buf[..want])
+                    .await?
+                    .context("the transfer ended early")?;
+                emit(&cb, &js_sys::Uint8Array::from(&buf[..n]).into());
+                left -= n as u64;
+                done += n as u64;
+                if done - reported >= 256 * 1024 || done == total {
+                    reported = done;
+                    emit(
+                        &cb,
+                        &to_js(&Progress {
+                            t: "progress",
+                            bytes: done,
+                            total,
+                        }),
+                    );
+                }
+            }
+        }
+        let mut extra = [0u8; 1];
+        ensure!(
+            recv.read(&mut extra).await?.is_none(),
+            "the device sent more than it announced"
+        );
+        write_msg(&mut send, &Reply::Done { bytes: total }).await?;
+        send.finish().ok();
+        timeout(Duration::from_secs(5), send.stopped()).await.ok();
+        conn.close(0u32.into(), b"done");
+        info!("received {total} bytes");
+        Ok(total)
+    }
+
+    async fn send(
+        &self,
+        endpoint: Endpoint,
+        keep_dots: bool,
+        files: js_sys::Array,
+        cb: js_sys::Function,
+    ) -> Result<u64> {
+        let files: Vec<web_sys::File> = files
+            .iter()
+            .map(|f| {
+                f.dyn_into::<web_sys::File>()
+                    .map_err(|_| anyhow!("not a File"))
+            })
+            .collect::<Result<_>>()?;
+        ensure!(!files.is_empty(), "no files picked");
+        // flat names from the picker; keep them unique
+        let mut seen = std::collections::HashSet::new();
+        let mut entries = Vec::new();
+        for f in &files {
+            let name = safe_name(&f.name());
+            let mut candidate = name.clone();
+            for i in 2.. {
+                if seen.insert(candidate.clone()) {
+                    break;
+                }
+                candidate = match name.rsplit_once('.') {
+                    Some((stem, ext)) if !stem.is_empty() => format!("{stem} ({i}).{ext}"),
+                    _ => format!("{name} ({i})"),
+                };
+            }
+            entries.push(Entry::file(candidate, f.size() as u64));
+        }
+        let m = Manifest { entries };
+        m.validate()?;
+        let total = m.total_bytes();
+        let (conn, mut send, mut recv) = self.dial_pipe(&endpoint, keep_dots).await?;
+        write_msg_max(&mut send, &m, MAX_MANIFEST).await?;
+        match read_msg::<Reply>(&mut recv).await? {
+            Some(Reply::Accept) => {}
+            Some(Reply::Reject { message }) => bail!("the computer refused: {message}"),
+            other => bail!("unexpected reply {other:?}"),
+        }
+        info!("sending {}", m.summary());
+        let mut done = 0u64;
+        for (f, e) in files.iter().zip(&m.entries) {
+            let mut offset = 0u64;
+            while offset < e.size {
+                let end = (offset + CHUNK as u64).min(e.size);
+                let blob = f
+                    .slice_with_f64_and_f64(offset as f64, end as f64)
+                    .map_err(|e| anyhow!("can't read {}: {e:?}", f.name()))?;
+                let data = wasm_bindgen_futures::JsFuture::from(blob.array_buffer())
+                    .await
+                    .map_err(|e| anyhow!("can't read {}: {e:?}", f.name()))?;
+                let data = js_sys::Uint8Array::new(&data).to_vec();
+                ensure!(
+                    data.len() as u64 == end - offset,
+                    "{} changed while sending",
+                    f.name()
+                );
+                send.write_all(&data).await?;
+                offset = end;
+                done += data.len() as u64;
+                emit(
+                    &cb,
+                    &to_js(&Progress {
+                        t: "progress",
+                        bytes: done,
+                        total,
+                    }),
+                );
+            }
+        }
+        send.finish()?;
+        match read_msg::<Reply>(&mut recv).await? {
+            Some(Reply::Done { bytes }) if bytes == total => {}
+            Some(Reply::Reject { message }) => bail!("the computer failed: {message}"),
+            other => bail!("the computer didn't confirm the transfer ({other:?})"),
+        }
+        conn.close(0u32.into(), b"done");
+        info!("sent {total} bytes");
+        Ok(total)
+    }
+}
+
+/// Picker names are plain file names, but don't trust them.
+fn safe_name(name: &str) -> String {
+    let name: String = name
+        .chars()
+        .map(|c| {
+            if c == '/' || c == '\\' || c == '\0' {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    match name.as_str() {
+        "" | "." | ".." => "file".into(),
+        _ => name,
     }
 }

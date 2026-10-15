@@ -11,6 +11,8 @@
 //!    them dials the other on [`ALPN_PIPE`]; the acceptor only lets the endpoint id
 //!    it was told about in. From there on it works like dumbpipe.
 
+pub mod files;
+
 use std::{fmt, str::FromStr};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -49,6 +51,10 @@ pub enum Role {
     ListenTcp,
     /// Listen on a local TCP port and forward every connection to the peer.
     ConnectTcp,
+    /// Send files (see [`files`]); with a single file also works towards a plain pipe.
+    Send,
+    /// Receive files (see [`files`]); a single file also works from a plain pipe.
+    Recv,
 }
 
 impl Role {
@@ -57,6 +63,8 @@ impl Role {
             Role::Pipe => 'P',
             Role::ListenTcp => 'L',
             Role::ConnectTcp => 'C',
+            Role::Send => 'S',
+            Role::Recv => 'R',
         }
     }
 
@@ -65,6 +73,8 @@ impl Role {
             'P' => Some(Role::Pipe),
             'L' => Some(Role::ListenTcp),
             'C' => Some(Role::ConnectTcp),
+            'S' => Some(Role::Send),
+            'R' => Some(Role::Recv),
             _ => None,
         }
     }
@@ -74,6 +84,8 @@ impl Role {
             Role::Pipe => "pipe",
             Role::ListenTcp => "listen-tcp",
             Role::ConnectTcp => "connect-tcp",
+            Role::Send => "send",
+            Role::Recv => "recv",
         }
     }
 
@@ -89,9 +101,12 @@ impl Role {
             (ConnectTcp, ConnectTcp) => Err(
                 "both devices forward a local port (connect-tcp); run `listen-tcp` or `pipe` on one of them",
             ),
+            (Send, Send) => Err("both devices want to send; run `qrtx recv` on one of them"),
+            (Recv, Recv) => Err("both devices want to receive; run `qrtx send` on one of them"),
             (ConnectTcp, _) | (_, ListenTcp) => Ok(Some(true)),
             (ListenTcp, _) | (_, ConnectTcp) => Ok(Some(false)),
-            (Pipe, Pipe) => Ok(None),
+            // pipe, send and recv in any combination: either side may dial
+            _ => Ok(None),
         }
     }
 }
@@ -344,8 +359,12 @@ pub enum DeviceMsg {
 }
 
 pub async fn write_msg<T: Serialize>(send: &mut SendStream, msg: &T) -> Result<()> {
+    write_msg_max(send, msg, MAX_FRAME).await
+}
+
+pub async fn write_msg_max<T: Serialize>(send: &mut SendStream, msg: &T, max: usize) -> Result<()> {
     let body = serde_json::to_vec(msg)?;
-    ensure!(body.len() <= MAX_FRAME, "message too large");
+    ensure!(body.len() <= max, "message too large");
     send.write_all(&(body.len() as u32).to_be_bytes()).await?;
     send.write_all(&body).await?;
     Ok(())
@@ -353,6 +372,13 @@ pub async fn write_msg<T: Serialize>(send: &mut SendStream, msg: &T) -> Result<(
 
 /// Reads one message; `Ok(None)` if the stream ended cleanly before it.
 pub async fn read_msg<T: for<'de> Deserialize<'de>>(recv: &mut RecvStream) -> Result<Option<T>> {
+    read_msg_max(recv, MAX_FRAME).await
+}
+
+pub async fn read_msg_max<T: for<'de> Deserialize<'de>>(
+    recv: &mut RecvStream,
+    max: usize,
+) -> Result<Option<T>> {
     let mut len = [0u8; 4];
     match recv.read(&mut len[..1]).await? {
         None => return Ok(None),
@@ -361,7 +387,7 @@ pub async fn read_msg<T: for<'de> Deserialize<'de>>(recv: &mut RecvStream) -> Re
     }
     recv.read_exact(&mut len[1..]).await?;
     let len = u32::from_be_bytes(len) as usize;
-    ensure!(len <= MAX_FRAME, "message too large ({len} bytes)");
+    ensure!(len <= max, "message too large ({len} bytes)");
     let mut body = vec![0u8; len];
     recv.read_exact(&mut body).await?;
     Ok(Some(serde_json::from_slice(&body)?))
@@ -447,5 +473,17 @@ mod tests {
         assert_eq!(a_dials(Pipe, ConnectTcp), Ok(false));
         assert!(a_dials(ListenTcp, ListenTcp).is_err());
         assert!(a_dials(ConnectTcp, ConnectTcp).is_err());
+        assert_eq!(a_dials(Send, Recv), Ok(false));
+        assert_eq!(a_dials(Recv, Pipe), Ok(false));
+        assert!(a_dials(Send, Send).is_err());
+        assert!(a_dials(Recv, Recv).is_err());
+    }
+
+    #[test]
+    fn new_roles_roundtrip() {
+        for role in [Role::Send, Role::Recv] {
+            let t = ticket(role, None);
+            assert_eq!(t.to_url(DEFAULT_SITE).parse::<Ticket>().unwrap().role, role);
+        }
     }
 }

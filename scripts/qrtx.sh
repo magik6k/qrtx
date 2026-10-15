@@ -6,9 +6,9 @@
 #   curl -fsSL https://qrtx.lol/run | sh -s -- listen-tcp --host localhost:22
 #   sh -c "$(curl -fsSL https://qrtx.lol/run)" qrtx < file   # keeps your stdin
 #
-# Send a file without installing anything:
-#   sender:   curl -fsSL https://qrtx.lol/send | sh -s -- backup.tar
-#   receiver: curl -fsSL https://qrtx.lol/recv | sh -s -- backup.tar
+# Send files without installing anything:
+#   sender:   curl -fsSL https://qrtx.lol/send | sh -s -- photos/ *.txt
+#   receiver: curl -fsSL https://qrtx.lol/recv | sh
 #
 # SSH into a machine without opening any ports (one session):
 #   server: curl -fsSL https://qrtx.lol/sshd | sh

@@ -58,6 +58,15 @@
         <button id="restart" type="button" class="ghost" hidden>Start over</button>
       </div>
 
+      <div id="direct" hidden>
+        <button id="direct-recv" type="button" class="ghost" hidden>…or receive on this phone</button>
+        <button id="direct-send" type="button" class="ghost" hidden>…or send from this phone</button>
+        <input id="direct-files" type="file" multiple hidden>
+        <div id="direct-progress" hidden><div class="bar"><span></span></div><div class="label"></div></div>
+        <ul id="received"></ul>
+        <button id="share" type="button" class="primary" hidden>Save / share…</button>
+      </div>
+
       <details id="paste-box">
         <summary>no camera? paste the link</summary>
         <form id="paste-form">
@@ -141,6 +150,7 @@
         <li>QR code = endpoint key + relay + one-time secret, in the URL <code>#fragment</code> (never sent to the server)</li>
         <li>phone runs iroh (wasm), dials each computer, proves it saw the code with the secret</li>
         <li>computers connect directly, NAT hole-punched, relay as fallback; each accepts only the introduced key</li>
+        <li>or the phone is the other end: it introduces itself, then sends/receives files (relayed, still end-to-end encrypted)</li>
         <li>this site is static files</li>
       </ul>
     </section>
@@ -149,10 +159,10 @@
       <h2 id="setup-h">usage</h2>
       <p class="note">Run on both machines, scan both codes. Linux / macOS, x86-64 / arm64.</p>
 
-      <h3>send a file (no install)</h3>
-      <div class="cmd"><span class="who">sender</span><pre><code>curl -fsSL <span class="origin">https://qrtx.lol</span>/send | sh -s -- backup.tar</code></pre></div>
-      <div class="cmd"><span class="who">receiver</span><pre><code>curl -fsSL <span class="origin">https://qrtx.lol</span>/recv | sh -s -- backup.tar</code></pre></div>
-      <p class="note">installed: <code>qrtx send f</code> / <code>qrtx recv f</code>, or pipes: <code>tar c . | qrtx</code> / <code>qrtx | tar x</code></p>
+      <h3>send files (no install)</h3>
+      <div class="cmd"><span class="who">sender</span><pre><code>curl -fsSL <span class="origin">https://qrtx.lol</span>/send | sh -s -- *.jpg notes.txt photos/</code></pre></div>
+      <div class="cmd"><span class="who">receiver</span><pre><code>curl -fsSL <span class="origin">https://qrtx.lol</span>/recv | sh</code></pre></div>
+      <p class="note">directories ask first (<code>-y</code> skips). <code>recv DIR/</code> picks the destination, <code>recv NAME</code> renames a single file. No second computer? Scan just one; the phone can receive or send the files itself.</p>
 
       <h3>ssh, no open ports</h3>
       <div class="cmd"><span class="who">server</span><pre><code>curl -fsSL <span class="origin">https://qrtx.lol</span>/sshd | sh</code></pre></div>
@@ -181,13 +191,13 @@
  then connect peer-to-peer over an end-to-end encrypted iroh tunnel; your
  data never goes through the phone or this site.
 
- [1mSend a file[0m [2m(nothing to install)[0m
-   [36mcurl -fsSL https://qrtx.lol/send | sh -s -- backup.tar[0m   [2m# sender[0m
-   [36mcurl -fsSL https://qrtx.lol/recv | sh -s -- backup.tar[0m   [2m# receiver[0m
+ [1mSend files[0m [2m(nothing to install; or scan just one side to use the phone)[0m
+   [36mcurl -fsSL https://qrtx.lol/send | sh -s -- photos/ *.txt[0m   [2m# sender[0m
+   [36mcurl -fsSL https://qrtx.lol/recv | sh[0m                       [2m# receiver[0m
 
  [1mSSH in[0m [2m(one session, no open ports)[0m
-   [36mcurl -fsSL https://qrtx.lol/sshd | sh[0m                    [2m# server[0m
-   [36mcurl -fsSL https://qrtx.lol/ssh | sh -s -- me@myserver[0m   [2m# laptop[0m
+   [36mcurl -fsSL https://qrtx.lol/sshd | sh[0m                       [2m# server[0m
+   [36mcurl -fsSL https://qrtx.lol/ssh | sh -s -- me@myserver[0m      [2m# laptop[0m
 
  [1mInstall[0m
    [36mcurl -fsSL https://qrtx.lol/install | sh[0m

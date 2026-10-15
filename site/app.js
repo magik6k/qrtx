@@ -14,6 +14,13 @@ const els = {
   pasteForm: $("#paste-form"),
   paste: $("#paste"),
   pasteBox: $("#paste-box"),
+  direct: $("#direct"),
+  directRecv: $("#direct-recv"),
+  directSend: $("#direct-send"),
+  directFiles: $("#direct-files"),
+  directProgress: $("#direct-progress"),
+  received: $("#received"),
+  share: $("#share"),
   diag: $("#diag"),
   diagLog: $("#diag-log"),
   diagCopy: $("#diag-copy"),
@@ -57,8 +64,9 @@ const SLOT_HINTS = [
   ["Second computer", "scan the other one"],
 ];
 
-// phase: "collect" (scanning/connecting), "pairing", "done", "failed"
-const state = { phase: "collect", node: null, slots: [emptySlot(), emptySlot()] };
+// phase: "collect" (scanning/connecting), "pairing" (introducing two computers),
+// "direct" (the phone itself sends/receives), "done", "failed"
+const state = { phase: "collect", node: null, slots: [emptySlot(), emptySlot()], received: [] };
 
 function emptySlot() {
   return { ticket: null, info: null, device: null, dev: null, status: "empty", label: "", error: "" };
@@ -105,6 +113,20 @@ function render() {
   els.restart.hidden = state.phase === "collect" && !state.slots.some((s) => s.status === "error");
   els.restart.textContent = state.phase === "done" ? "Connect two more" : "Start over";
   els.pasteBox.hidden = state.phase !== "collect";
+  // the phone as an endpoint: offered once one computer that sends/receives is verified
+  const solo = soloDevice();
+  const role = solo?.dev.role;
+  const offer = state.phase === "collect" && (role === "send" || role === "recv");
+  els.directRecv.hidden = !(offer && role === "send");
+  els.directSend.hidden = !(offer && role === "recv");
+  els.direct.hidden = !offer && state.phase !== "direct" && state.received.length === 0;
+}
+
+/** The verified computer when it's the only one scanned so far. */
+function soloDevice() {
+  const ok = state.slots.filter((s) => s.status === "ok");
+  const empty = state.slots.filter((s) => s.status === "empty" || s.status === "error");
+  return ok.length === 1 && empty.length === 1 ? ok[0] : null;
 }
 
 function say(text, kind = "") {
@@ -180,7 +202,10 @@ async function maybePair() {
   if (a.status !== "ok" || b.status !== "ok") {
     const one = state.slots.find((s) => s.status === "ok");
     const other = state.slots.find((s) => s.status === "empty");
-    if (one && other) say(`Connected to <b>${esc(one.dev.name)}</b>. Now scan the other computer.`);
+    if (one && other) {
+      const alt = { send: ", or receive the files on this phone", recv: ", or send files from this phone" }[one.dev.role] ?? "";
+      say(`Connected to <b>${esc(one.dev.name)}</b>. Now scan the other computer${alt}.`);
+    }
     return;
   }
   let aDialsB;
@@ -229,6 +254,138 @@ async function maybePair() {
   navigator.vibrate?.([40, 60, 40]);
   render();
 }
+
+// ---------- the phone as sender/receiver ----------
+
+const MIME = {
+  jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp", heic: "image/heic",
+  mp4: "video/mp4", mov: "video/quicktime", mp3: "audio/mpeg", m4a: "audio/mp4", pdf: "application/pdf",
+  txt: "text/plain", md: "text/markdown", json: "application/json", zip: "application/zip",
+};
+const mimeOf = (name) => MIME[name.split(".").pop().toLowerCase()] ?? "application/octet-stream";
+const human = (n) => {
+  const u = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let i = 0;
+  for (; n >= 1024 && i < u.length - 1; i++) n /= 1024;
+  return i ? `${n.toFixed(1)} ${u[i]}` : `${n} B`;
+};
+
+function showProgress(done, total, label) {
+  els.directProgress.hidden = false;
+  els.directProgress.querySelector("span").style.width = total ? `${(100 * done) / total}%` : "0";
+  els.directProgress.querySelector(".label").textContent = `${label}  ${human(done)} / ${human(total)}`;
+}
+
+/** Start the direct mode: the computer is told to expect the phone itself. */
+async function startDirect(s, myRole) {
+  state.phase = "direct";
+  stopScanner();
+  setSlot(s, "busy", myRole === "recv" ? "sending to phone" : "receiving from phone");
+  const node = await nodePromise;
+  // the other slot is this phone now
+  const me = state.slots.find((x) => x !== s);
+  Object.assign(me, {
+    ...emptySlot(),
+    info: { short: node.id(), role: myRole },
+    dev: { name: "this phone", detail: myRole === "recv" ? "receives the files" : "sends files", short: node.id() },
+    status: "busy",
+    label: myRole === "recv" ? "receiving" : "sending",
+  });
+  render();
+  dlog(`direct: phone ${myRole === "recv" ? "receives from" : "sends to"} ${s.dev.short}`);
+  await s.device.pairWithPhone(node, myRole);
+  // the computer reports when our tunnel shows up; read that in the background
+  const connected = s.device.waitConnected().catch((e) => dlog(`direct: ${errText(e)}`));
+  return { node, connected };
+}
+
+async function directReceive() {
+  const s = soloDevice();
+  if (!s) return;
+  try {
+    const { node, connected } = await startDirect(s, "recv");
+    const files = [];
+    let total = 0, summary = "";
+    say("Receiving…");
+    await s.device.receiveFiles(node, (ev) => {
+      if (ev instanceof Uint8Array) files[files.length - 1].parts.push(ev);
+      else if (ev.t === "file") files.push({ path: ev.path, size: ev.size, parts: [] });
+      else if (ev.t === "manifest") {
+        total = ev.total;
+        summary = ev.summary;
+        showProgress(0, total, "receiving");
+      } else if (ev.t === "progress") showProgress(ev.bytes, total, "receiving");
+    });
+    await connected;
+    s.device.close();
+    state.received = files.map((f) => ({
+      path: f.path,
+      file: new File(f.parts, f.path.split("/").pop(), { type: mimeOf(f.path) }),
+    }));
+    showReceived();
+    setSlot(s, "done", "sent");
+    setSlot(state.slots.find((x) => x !== s), "done", "received");
+    state.phase = "done";
+    say(`Received ${esc(summary)}. Save the files below.`, "ok");
+    navigator.vibrate?.([40, 60, 40]);
+    render();
+  } catch (e) {
+    fail(e);
+  }
+}
+
+function showReceived() {
+  els.received.replaceChildren(
+    ...state.received.map(({ path, file }) => {
+      const li = document.createElement("li");
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(file);
+      a.download = file.name;
+      a.textContent = path;
+      const size = document.createElement("span");
+      size.className = "size";
+      size.textContent = human(file.size);
+      li.append(a, size);
+      return li;
+    }),
+  );
+  const files = state.received.map((r) => r.file);
+  els.share.hidden = !(navigator.canShare && navigator.canShare({ files }));
+}
+
+els.share.addEventListener("click", () => {
+  navigator.share({ files: state.received.map((r) => r.file) }).catch((e) => dlog(`share: ${errText(e)}`));
+});
+
+els.directRecv.addEventListener("click", directReceive);
+// picking files must happen in the click itself (iOS), the transfer starts on change
+els.directSend.addEventListener("click", () => els.directFiles.click());
+els.directFiles.addEventListener("change", async () => {
+  const picked = [...els.directFiles.files];
+  const s = soloDevice();
+  if (!picked.length || !s) return;
+  try {
+    const { node, connected } = await startDirect(s, "send");
+    const total = picked.reduce((n, f) => n + f.size, 0);
+    say(`Sending ${picked.length} file${picked.length > 1 ? "s" : ""}…`);
+    showProgress(0, total, "sending");
+    await s.device.sendFiles(node, picked, (ev) => {
+      if (ev.t === "progress") showProgress(ev.bytes, ev.total, "sending");
+    });
+    await connected;
+    s.device.close();
+    setSlot(s, "done", "received");
+    setSlot(state.slots.find((x) => x !== s), "done", "sent");
+    state.phase = "done";
+    say(`Sent ${picked.length} file${picked.length > 1 ? "s" : ""} (${human(total)}) to <b>${esc(s.dev.name)}</b>.`, "ok");
+    navigator.vibrate?.([40, 60, 40]);
+    render();
+  } catch (e) {
+    fail(e);
+  } finally {
+    els.directFiles.value = "";
+  }
+});
 
 function setSlot(s, status, label, error = "") {
   Object.assign(s, { status, label, error });
@@ -349,6 +506,11 @@ function detectWasm(video) {
 
 function restart() {
   state.slots.forEach((s) => s.device?.close());
+  els.received.querySelectorAll("a").forEach((a) => URL.revokeObjectURL(a.href));
+  els.received.replaceChildren();
+  els.share.hidden = true;
+  els.directProgress.hidden = true;
+  state.received = [];
   state.phase = "collect";
   state.slots = [emptySlot(), emptySlot()];
   scanner.lastText = "";

@@ -21,20 +21,23 @@ curl -fsSL https://qrtx.lol/sshd | sh                      # on the server
 curl -fsSL https://qrtx.lol/ssh | sh -s -- me@myserver     # on your laptop
 ```
 
-**Send a file**, nothing to install:
+**Send files**, nothing to install:
 
 ```sh
-curl -fsSL https://qrtx.lol/send | sh -s -- backup.tar     # sender
-curl -fsSL https://qrtx.lol/recv | sh -s -- backup.tar     # receiver
+curl -fsSL https://qrtx.lol/send | sh -s -- photos/ *.txt  # sender
+curl -fsSL https://qrtx.lol/recv | sh                      # receiver
 ```
+
+Only one computer? Scan just its code: the page offers to receive the files
+on the phone (or, for `recv`, to send files from the phone).
 
 **Install** and use it for anything else:
 
 ```sh
 curl -fsSL https://qrtx.lol/install | sh
 
-qrtx send backup.tar                           # machine A: send a file
-qrtx recv backup.tar                           # machine B: receive it
+qrtx send *.jpg photos/                        # machine A: send files/dirs
+qrtx recv                                      # machine B: into the current dir
 tar c dir | qrtx                               # or any pipe; the other
 qrtx | tar x                                   # side runs plain `qrtx`
 
@@ -47,8 +50,10 @@ qrtx.lol. Scan the other code from that page. Done.
 
 Notes:
 
-- `qrtx recv` writes to `FILE.part` and renames it once complete. It won't
-  overwrite an existing file unless you pass `--force`.
+- `qrtx send` takes files and directories; directories ask for confirmation
+  first (`-y` skips). `qrtx recv DIR/` picks where files land, `qrtx recv NAME`
+  renames a single file. Files are written as `.part` and renamed once
+  complete; existing files are never overwritten without `--force`.
 - To run anything else once without installing, use
   `curl -fsSL https://qrtx.lol/run | sh -s -- <args>`.
 - `qrtx sshd` lets in one connection, then exits.
