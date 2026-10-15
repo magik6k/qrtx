@@ -63,6 +63,17 @@ struct Cli {
     #[arg(long, env = "QRTX_NAME", global = true)]
     name: Option<String>,
 
+    /// Connect straight to the machine showing this code (its URL or the
+    /// `Q1…` text printed under it), no phone needed.
+    #[arg(
+        short,
+        long,
+        env = "QRTX_CONNECT",
+        global = true,
+        value_name = "TICKET"
+    )]
+    connect: Option<String>,
+
     /// Increase log verbosity (-v, -vv).
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
@@ -265,7 +276,7 @@ impl Device {
         };
         write_msg(send, &welcome).await?;
         status(format_args!(
-            "phone [{}] connected, waiting for it to scan the other machine…",
+            "[{}] connected, waiting to be paired…",
             phone.fmt_short()
         ));
 
@@ -548,7 +559,8 @@ fn main() -> Result<()> {
         return exec_ssh(&cli, ssh_args.unwrap_or_else(|| args.clone()));
     }
     let filter = match cli.verbose {
-        0 => "warn",
+        // iroh's network probing warns about things users can't act on
+        0 => "warn,iroh::net_report=error,portmapper=error",
         1 => "info,qrtx=debug",
         _ => "debug",
     };
@@ -577,6 +589,7 @@ async fn run(cli: Cli) -> Result<()> {
         .unwrap_or(Command::Pipe { ssh_proxy: false });
     let role = command.role();
     let mut detail = command.detail();
+    let original = command.clone();
     let command = match command {
         Command::Sshd { host } => Command::ListenTcp { host, once: true },
         other => other,
@@ -707,15 +720,20 @@ async fn run(cli: Cli) -> Result<()> {
             "warning: could not reach a relay server; pairing may not work"
         ));
     }
-    let relay = endpoint.addr().relay_urls().next().cloned();
-    let ticket = Ticket::new(endpoint.id(), role, device.secret, relay);
-    print_qr(&ticket.to_url(&cli.site), &device);
-
-    let peer = tokio::select! {
-        peer = peer_rx.recv() => peer.context("pairing channel closed")?,
-        _ = terminated() => {
-            router.shutdown().await.ok();
-            return Ok(());
+    let peer = if let Some(target) = &cli.connect {
+        let target: Ticket = target.parse().context("invalid --connect ticket")?;
+        pair_directly(&endpoint, &device, &target).await?
+    } else {
+        let relay = endpoint.addr().relay_urls().next().cloned();
+        let ticket = Ticket::new(endpoint.id(), role, device.secret, relay);
+        let hints = connect_hints(&original, &ticket.payload(), &cli.site, &device.name);
+        print_qr(&ticket.to_url(&cli.site), &device, &hints);
+        tokio::select! {
+            peer = peer_rx.recv() => peer.context("pairing channel closed")?,
+            _ = terminated() => {
+                router.shutdown().await.ok();
+                return Ok(());
+            }
         }
     };
     status(format_args!(
@@ -1156,7 +1174,7 @@ async fn terminated() {
     }
 }
 
-fn print_qr(url: &str, device: &Device) {
+fn print_qr(url: &str, device: &Device, hints: &[String]) {
     let mut err = std::io::stderr().lock();
     match qrcode::QrCode::with_error_correction_level(url, qrcode::EcLevel::M) {
         Ok(code) => {
@@ -1166,12 +1184,138 @@ fn print_qr(url: &str, device: &Device) {
     }
     let _ = writeln!(
         err,
-        "\n  qrtx on {} [{}]: {} ({})\n  Scan with your phone, or open:\n  {url}\n",
+        "\n  qrtx on {} [{}]: {} ({})\n  Scan with your phone, or open {url}",
         device.name,
         device.id.fmt_short(),
         device.role,
         device.detail
     );
+    if !hints.is_empty() {
+        let _ = writeln!(err, "  or, if you can paste, run on the other machine:");
+        for h in hints {
+            let _ = writeln!(err, "    {h}");
+        }
+    }
+    let _ = writeln!(err);
+}
+
+/// What to run on the other machine to connect without the phone.
+fn connect_hints(command: &Command, ticket: &str, site: &str, name: &str) -> Vec<String> {
+    let site = site.trim_end_matches('/');
+    let port = |hostport: &str| {
+        hostport
+            .rsplit_once(':')
+            .map_or("PORT", |(_, p)| p)
+            .to_owned()
+    };
+    match command {
+        Command::Send { .. } => vec![
+            format!("qrtx recv --connect {ticket}"),
+            format!("curl -fsSL {site}/recv | sh -s -- --connect {ticket}"),
+        ],
+        Command::Recv { .. } => vec![
+            format!("qrtx send FILES... --connect {ticket}"),
+            format!("curl -fsSL {site}/send | sh -s -- --connect {ticket} FILES..."),
+        ],
+        Command::Sshd { .. } => {
+            let user = std::env::var("USER").unwrap_or_else(|_| "you".into());
+            vec![
+                format!("qrtx --connect {ticket} ssh {user}@{name}"),
+                format!("curl -fsSL {site}/ssh | QRTX_CONNECT={ticket} sh -s -- {user}@{name}"),
+            ]
+        }
+        Command::Pipe { ssh_proxy: true } | Command::Ssh { .. } => vec![
+            format!("qrtx sshd --connect {ticket}"),
+            format!("curl -fsSL {site}/sshd | sh -s -- --connect {ticket}"),
+        ],
+        Command::Pipe { ssh_proxy: false } => vec![format!("qrtx --connect {ticket}")],
+        Command::ListenTcp { host, .. } => vec![format!(
+            "qrtx --connect {ticket} connect-tcp --addr 127.0.0.1:{}",
+            port(host)
+        )],
+        Command::ConnectTcp { addr } => vec![format!(
+            "qrtx --connect {ticket} listen-tcp --host localhost:{}",
+            port(addr)
+        )],
+    }
+}
+
+/// `--connect`: do what the phone would, with ourselves as the peer.
+async fn pair_directly(endpoint: &Endpoint, device: &Device, target: &Ticket) -> Result<Peer> {
+    status(format_args!(
+        "connecting to [{}] directly…",
+        target.id.fmt_short()
+    ));
+    let conn = timeout(
+        Duration::from_secs(30),
+        endpoint.connect(target.addr(), ALPN_PAIR),
+    )
+    .await
+    .context("timed out reaching the other machine; is qrtx still running there?")?
+    .context("could not reach the other machine")?;
+    let (mut send, mut recv) = conn.open_bi().await?;
+    write_msg(
+        &mut send,
+        &PhoneMsg::Auth {
+            secret: target.secret_b32(),
+        },
+    )
+    .await?;
+    let (role, name) = match read_msg::<DeviceMsg>(&mut recv).await? {
+        Some(DeviceMsg::Welcome { role, name, .. }) => (role, name),
+        Some(DeviceMsg::Error { message }) => bail!(message),
+        other => bail!("unexpected reply {other:?}"),
+    };
+    anyhow::ensure!(
+        role == target.role,
+        "the other machine reports role {role} but its code says {}",
+        target.role
+    );
+    // whoever the role rules say; either way when it doesn't matter
+    let we_dial = device
+        .role
+        .dials(role)
+        .map_err(|e| anyhow!(e))?
+        .unwrap_or(true);
+    if let Some((needed, why)) = &device.needs_peer
+        && role != *needed
+    {
+        bail!("{why}");
+    }
+    let peer = Peer {
+        id: target.id,
+        relay: target.relay.clone(),
+        name,
+        role,
+        dial: we_dial,
+    };
+    // let it in on our tunnel ALPN if it's the one dialing
+    device
+        .peer
+        .set(peer.clone())
+        .map_err(|_| anyhow!("already paired"))?;
+    let pair = PhoneMsg::Pair {
+        id: qrtx_proto::encode_id(&device.id),
+        relay: endpoint.addr().relay_urls().next().map(|r| r.to_string()),
+        role: device.role,
+        name: device.name.clone(),
+        dial: !we_dial,
+    };
+    write_msg(&mut send, &pair).await?;
+    match read_msg::<DeviceMsg>(&mut recv).await? {
+        Some(DeviceMsg::Ready) => {}
+        Some(DeviceMsg::Error { message }) => bail!(message),
+        other => bail!("unexpected reply {other:?}"),
+    }
+    // the other side reports on this session once the tunnel is up; drain it
+    tokio::spawn(async move {
+        if let Ok(Some(DeviceMsg::Error { message })) = read_msg::<DeviceMsg>(&mut recv).await {
+            warn!("the other machine reported: {message}");
+        }
+        send.finish().ok();
+        conn.close(0u32.into(), b"done");
+    });
+    Ok(peer)
 }
 
 /// Splits `qrtx [OPTS] ssh SSH_ARGS...` into our part and ssh's part.
@@ -1179,7 +1323,7 @@ fn split_ssh_args(argv: &[String]) -> (&[String], Option<Vec<String>>) {
     let mut i = 1;
     while let Some(arg) = argv.get(i) {
         match arg.as_str() {
-            "--site" | "--name" => i += 2,
+            "--site" | "--name" | "--connect" | "-c" => i += 2,
             a if a.starts_with('-') => i += 1,
             _ => break,
         }
@@ -1217,6 +1361,9 @@ fn exec_ssh(cli: &Cli, mut args: Vec<String>) -> Result<()> {
         .env("QRTX_SITE", &cli.site);
     if let Some(name) = &cli.name {
         ssh.env("QRTX_NAME", name);
+    }
+    if let Some(ticket) = &cli.connect {
+        ssh.env("QRTX_CONNECT", ticket);
     }
     let err = ssh.exec();
     Err(err).context("could not run ssh; is the OpenSSH client installed?")

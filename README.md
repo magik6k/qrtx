@@ -60,6 +60,9 @@ Notes:
 - `qrtx ssh` runs your normal `ssh` with qrtx as its proxy, so ssh options and
   host key checks work as usual. `myserver` is only the name the host key is
   saved under.
+- No phone, but you can copy-paste between the machines? Each command prints a
+  `--connect` line under its QR code; run that on the other machine instead of
+  scanning.
 - `qrtx --help` lists everything.
 
 ## Self-hosting

@@ -555,7 +555,70 @@ async function pipeCompatScenario(site) {
   log("ok: send -> pipe, pipe -> recv FILE, and multi-file -> pipe refused with a hint");
 }
 
+/** Run qrtx without waiting for a QR code (e.g. with --connect). */
+function runDevice(name, args, site, { stdin = "ignore" } = {}) {
+  const proc = spawn(QRTX, args, {
+    env: { ...process.env, QRTX_SITE: site, QRTX_NAME: name, RUST_LOG: process.env.RUST_LOG ?? "warn" },
+    stdio: [stdin === "ignore" ? "ignore" : "pipe", "pipe", "pipe"],
+  });
+  cleanups.push(() => proc.kill("SIGKILL"));
+  const dev = { name, proc, stderr: "", stdout: [] };
+  proc.stdout.on("data", (d) => dev.stdout.push(d));
+  proc.stderr.on("data", (d) => (dev.stderr += d));
+  dev.exited = new Promise((resolve) => proc.on("exit", resolve));
+  return dev;
+}
+
+async function connectScenario(site) {
+  log("== no phone: paste the printed --connect command on the other machine");
+  const dir = path.join(tmp, "connect");
+  mkdirSync(dir);
+  const payload = randomBytes(1_200_000);
+  writeFileSync(path.join(dir, "data.bin"), payload);
+  const sender = await startDevice("e2e-sender", ["send", path.join(dir, "data.bin")], site);
+  const hint = sender.stderr.match(/qrtx recv --connect (\S+)/)?.[1];
+  if (!hint) throw new Error(`no --connect hint printed:\n${sender.stderr}`);
+  const out = path.join(dir, "got.bin");
+  const receiver = runDevice("e2e-receiver", ["recv", out, "--connect", hint], site);
+  const codes = await withTimeout(Promise.all([sender.exited, receiver.exited]), 60_000, "connect send/recv");
+  if (codes.some((c) => c !== 0) || !readFileSync(out).equals(payload)) {
+    throw new Error(`exit codes ${codes}\n${sender.stderr}\n${receiver.stderr}`);
+  }
+  log("ok: recv --connect got the file, both exited 0");
+
+  // the side running --connect is the one that has to accept here (listen-tcp never dials)
+  const echo = net.createServer((s) => s.pipe(s));
+  await new Promise((r) => echo.listen(0, "127.0.0.1", r));
+  cleanups.push(() => echo.close());
+  const localPort = 20000 + Math.floor(Math.random() * 20000);
+  const laptop = await startDevice("e2e-laptop", ["connect-tcp", "--addr", `127.0.0.1:${localPort}`], site);
+  const t = laptop.stderr.match(/qrtx --connect (\S+) listen-tcp/)?.[1];
+  if (!t) throw new Error(`no listen-tcp hint printed:\n${laptop.stderr}`);
+  const server = runDevice("e2e-server", ["--connect", t, "listen-tcp", "--host", `127.0.0.1:${echo.address().port}`], site);
+  const bytes = randomBytes(100_000);
+  const got = await withTimeout((async () => {
+    for (;;) {
+      try {
+        return await new Promise((resolve, reject) => {
+          const chunks = [];
+          const sock = net.connect(localPort, "127.0.0.1", () => sock.end(bytes));
+          sock.on("data", (d) => chunks.push(d));
+          sock.on("end", () => resolve(Buffer.concat(chunks)));
+          sock.on("error", reject);
+        });
+      } catch {
+        await sleep(300); // the tunnel may still be coming up
+      }
+    }
+  })(), 40_000, "echo through --connect tunnel");
+  if (!got.equals(bytes)) throw new Error(`echo mismatch\n${laptop.stderr}\n${server.stderr}`);
+  laptop.proc.kill("SIGINT");
+  server.proc.kill("SIGINT");
+  log("ok: listen-tcp --connect accepted the tunnel, echo went through");
+}
+
 const scenarios = {
+  connect: connectScenario,
   compat: pipeCompatScenario,
   files: filesScenario, "phone-recv": phoneRecvScenario, "phone-send": phoneSendScenario,
   curl: curlScenario, tcp: tcpScenario, pipe: pipeScenario, roles: wrongRolesScenario,
